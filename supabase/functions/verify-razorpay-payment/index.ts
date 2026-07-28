@@ -126,19 +126,39 @@ Deno.serve(async (req: Request) => {
         const enrolledAt = new Date();
         const expiresAt = new Date(enrolledAt.getTime() + 365 * 24 * 60 * 60 * 1000);
         
+        // ── FIX ──────────────────────────────────────────────────────────
+        // This upsert specified no conflict target, so PostgREST defaulted to
+        // the primary key (`id`). Since no `id` is supplied, it behaved as a
+        // plain INSERT — and whenever an enrolment row already existed for this
+        // (user_id, course_id) it collided with uq_enrollments_user_course and
+        // errored. The error was only console.error'd, so the payment appeared
+        // to succeed while `payment_status` was never advanced to 'completed'.
+        //
+        // That is why a course could show as paid on the web (which applies no
+        // payment filter) yet vanish from the mobile app (which filters on
+        // payment_status). Target the real unique index so the row is updated.
         const { error: enrollError } = await supabaseAdmin
           .from("enrollments")
-          .upsert({
-            user_id: completedOrder.user_id,
-            course_id: Number(item.course_id),
-            payment_status: "completed",
-            status: "active",
-            enrolled_at: enrolledAt.toISOString(),
-            expires_at: expiresAt.toISOString(),
-          });
+          .upsert(
+            {
+              user_id: completedOrder.user_id,
+              course_id: Number(item.course_id),
+              payment_status: "completed",
+              status: "active",
+              enrolled_at: enrolledAt.toISOString(),
+              expires_at: expiresAt.toISOString(),
+            },
+            { onConflict: "user_id,course_id" },
+          );
 
         if (enrollError) {
-          console.error(`[verify-razorpay-payment] Enrollment failed for course ${item.course_id}:`, enrollError);
+          // Loud on purpose: a failure here means the learner paid but has no
+          // access. Previously this was logged and swallowed.
+          console.error(
+            `[verify-razorpay-payment] CRITICAL: enrolment write failed after successful payment ` +
+            `(user=${completedOrder.user_id}, course=${item.course_id}, order=${completedOrder.id}):`,
+            enrollError,
+          );
         }
       } else if (!item.is_course) {
         hasPhysical = true;

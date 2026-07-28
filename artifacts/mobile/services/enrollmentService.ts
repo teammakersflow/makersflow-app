@@ -50,12 +50,22 @@ export async function fetchEnrolledCourses(userId: string) {
   //    never completed) must not appear as enrolled courses. Legacy rows with
   //    a null payment_status are kept for backwards compatibility.
   // 3. Fix enrolled count bug: only count enrollments where payment_status is completed/free or the course is free.
-  return (data ?? []).filter(
-    (enr: any) =>
-      enr.courses &&
-      ((['completed', 'free'].includes(enr.payment_status)) ||
-        enr.courses.is_free === true),
-  );
+  // ── FIX ──────────────────────────────────────────────────────────────────
+  // Point 2 above says legacy rows with a NULL payment_status are kept for
+  // backwards compatibility, but the code did not actually do that:
+  // ['completed','free'].includes(null) is false, so any paid enrolment whose
+  // payment_status was never written was silently dropped. That is why the app
+  // reported 1 enrolled course while the web app reported 2 for the same user.
+  // Only genuinely unpaid states ('pending' / 'failed') should be excluded.
+  const REJECTED_PAYMENT_STATES = ['pending', 'failed', 'cancelled', 'refunded'];
+
+  return (data ?? []).filter((enr: any) => {
+    if (!enr.courses) return false;                 // course deleted/unpublished
+    if (enr.courses.is_free === true) return true;  // free course — always visible
+    const status = enr.payment_status;
+    if (status == null) return true;                // legacy row — keep (see above)
+    return !REJECTED_PAYMENT_STATES.includes(status);
+  });
 }
 
 export async function isEnrolled(userId: string, courseId: string | number): Promise<boolean> {

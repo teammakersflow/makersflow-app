@@ -3,6 +3,26 @@ import { supabase } from './supabase';
 import { getCourseModules } from '@/services/courseDataProvider';
 import { emitSessionExpired, isAuthError } from './sessionEvents';
 
+/**
+ * Single source of truth for "how far through a course is this learner".
+ *
+ * Rule: completed lessons / total lessons, rounded. If nothing is completed but
+ * some watching has happened, floor at 1% so an in-progress course never looks
+ * untouched. Mirrors web/src/lib/learn-data.ts so both platforms agree.
+ */
+export function computeCoursePercentage(
+  completed: number,
+  total: number,
+  avgWatchPercentage = 0,
+): number {
+  if (total <= 0) return 0;
+  if (completed >= total) return 100;
+  const ratio = Math.round((completed / total) * 100);
+  if (ratio > 0) return Math.min(ratio, 99);
+  return avgWatchPercentage > 0 ? 1 : 0;
+}
+
+
 export interface UserCourseProgress {
   userId: string;
   courseId: string;
@@ -303,17 +323,14 @@ export async function fetchCourseProgress(userId: string, courseId: string | num
   const avgWatchPercentage = total ? Math.round(totalWatchPercentage / total) : 0;
 
   // ── FIX ────────────────────────────────────────────────────────────────────
-  // This used to return the raw average watch_percentage. A lesson can be
-  // marked complete while its watch_percentage sits below 100 (the learner
-  // skips the outro, or the player rounds down), so a fully finished course
-  // reported something like 78% here while fetchRemoteProgress() — which does
-  // clamp — reported 100%. That mismatch is exactly why Home/Progress and
-  // Profile disagreed. Apply the same rule in both places: every lesson
-  // complete means the course is 100% complete.
-  const allLessonsCompleted = total > 0 && completed === total;
-  const percentage = allLessonsCompleted
-    ? 100
-    : Math.min(avgWatchPercentage, 99);
+  // Three different formulas were in play across the product:
+  //   * here                   -> average watch_percentage       (Courses tab: 78%)
+  //   * fetchRemoteProgress()  -> completion ratio + 100% clamp  (Home card: 100%)
+  //   * web lib/learn-data.ts  -> completedLessons / totalLessons (web: 100%)
+  // The same finished course reported 78% and 100% on two screens of the SAME
+  // app, and a third number on web. Standardise on the completion ratio: it is
+  // the figure the UI already prints beside it ("8 / 8 lessons").
+  const percentage = computeCoursePercentage(completed, total, avgWatchPercentage);
 
   return { completed, total, percentage, watchMinutes };
 }
@@ -444,7 +461,10 @@ export async function fetchRemoteProgress(userId: string): Promise<UserCoursePro
           }
         });
       });
-      const computedPct = totalLessons ? Math.round(watchPctSum / totalLessons) : 0;
+      // Same helper as fetchCourseProgress so Home and the Courses tab can never
+      // disagree about the same course again.
+      const avgWatchPct = totalLessons ? Math.round(watchPctSum / totalLessons) : 0;
+      const computedPct = computeCoursePercentage(completedLessons, totalLessons, avgWatchPct);
 
       const allLessonsCompleted = totalLessons > 0 && completedLessons === totalLessons;
 

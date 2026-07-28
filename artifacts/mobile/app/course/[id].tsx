@@ -199,10 +199,18 @@ export default function CourseDetailScreen() {
         if (cancelledRef.current) return;
 
         // 1. Modules
-        if (modulesRes.status === 'fulfilled' && modulesRes.value) {
+        // ── FIX ──────────────────────────────────────────────────────────
+        // `m.lessons.map(...)` threw whenever a module came back with a null
+        // `lessons` array (a module with no lessons yet, or an RLS-filtered
+        // row). The throw happened inside this .then(), so setModules() never
+        // ran and `modules` stayed []. That is why the header rendered
+        // Lessons "—" and Duration "Self-paced" on a course that genuinely has
+        // 28 lessons / 239 mins. Guard the array, and fall back to the
+        // course-level counts when the modules query fails outright.
+        if (modulesRes.status === 'fulfilled' && Array.isArray(modulesRes.value)) {
           const modulesData = modulesRes.value;
           const flatLessons = modulesData.flatMap((m: any) =>
-            m.lessons.map((l: any) => ({
+            (m?.lessons ?? []).map((l: any) => ({
               id: l.id,
               title: l.title,
               duration: l.duration_minutes ? `${l.duration_minutes} mins` : "0 mins",
@@ -210,6 +218,11 @@ export default function CourseDetailScreen() {
             }))
           );
           setModules(flatLessons);
+          if (flatLessons.length === 0) {
+            console.warn('[course] modules returned no lessons for course', id);
+          }
+        } else if (modulesRes.status === 'rejected') {
+          console.warn('[course] getCourseModules failed:', modulesRes.reason);
         }
 
         // 2. Course Reviews
@@ -294,8 +307,24 @@ export default function CourseDetailScreen() {
     return sorted[0]?.lesson_id;
   }, [lessonsProgress]);
 
-  const totalDurationMin = useMemo(() => modules.reduce((sum, m) => sum + (m.duration_minutes || 0), 0), [modules]);
-  const displayDuration = totalDurationMin > 0 ? `${totalDurationMin} mins` : "Self-paced";
+  const totalDurationMin = useMemo(
+    () => modules.reduce((sum, m) => sum + (m.duration_minutes || 0), 0),
+    [modules],
+  );
+
+  // ── FIX ────────────────────────────────────────────────────────────────────
+  // Fall back to the values stored on the course row when the modules query
+  // returns nothing, so the header keeps showing "28 Lessons / 239 mins"
+  // instead of collapsing to "—" and "Self-paced".
+  const fallbackLessonCount = Number((course as any)?.total_lessons ?? 0);
+  const fallbackDurationMin = Number(
+    (course as any)?.duration_minutes ?? (course as any)?.total_duration_minutes ?? 0,
+  );
+
+  const lessonCount = modules.length > 0 ? modules.length : fallbackLessonCount;
+  const effectiveDurationMin = totalDurationMin > 0 ? totalDurationMin : fallbackDurationMin;
+  const displayDuration =
+    effectiveDurationMin > 0 ? `${effectiveDurationMin} mins` : "Self-paced";
 
   if (isLoading) {
     return <DetailSkeleton />;
@@ -565,7 +594,7 @@ export default function CourseDetailScreen() {
           <View style={styles.statsStrip}>
             {[
               { icon: "star", value: avgRating != null ? avgRating.toFixed(1) : "—", label: "Rating" },
-              { icon: "book", value: modules.length > 0 ? `${modules.length}` : "—", label: "Lessons" },
+              { icon: "book", value: lessonCount > 0 ? `${lessonCount}` : "—", label: "Lessons" },
               { icon: "time", value: displayDuration, label: "Duration" },
             ].map((s) => (
               <View key={s.label} style={[styles.statChip, { backgroundColor: "#DCF7F4" }]}>
@@ -654,7 +683,7 @@ export default function CourseDetailScreen() {
 
               <Text style={[styles.sectionTitle, { color: colors.foreground }]}>Curriculum</Text>
               <Text style={[styles.curriculumSubtitle, { color: colors.mutedForeground }]}>
-                {modules.length} lessons · {displayDuration}
+                {lessonCount} lessons · {displayDuration}
               </Text>
               {modules.map((mod, idx) => {
                 const modProgress = lessonsProgress.find((p) => String(p.lesson_id) === String(mod.id));
