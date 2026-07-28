@@ -339,6 +339,26 @@ export default function HomeScreen() {
     }, [loadData])
   );
 
+  // ── FIX: reload once the signed-in user resolves ──────────────────────────
+  // On a cold start this screen often mounts before Supabase has restored the
+  // session, so the first loadData() ran with user?.id === undefined.
+  // homeRepository.get() then took its logged-out path and returned
+  // EMPTY_PROGRESS — 0 courses, 0 completed, 0% — and because hasLoadedOnce was
+  // already true nothing ever re-fetched. The stats sat at zero until a manual
+  // pull-to-refresh. Watch for the id arriving and load the private data then.
+  const loadedForUserRef = useRef<string | null>(null);
+  useEffect(() => {
+    const uid = user?.id ?? null;
+    if (!uid) {
+      loadedForUserRef.current = null;
+      return;
+    }
+    if (loadedForUserRef.current === uid) return;
+    loadedForUserRef.current = uid;
+    // Force a refresh so we bypass any logged-out cache entry written earlier.
+    loadData(true);
+  }, [user?.id, loadData]);
+
   const onRefresh = async () => {
     setRefreshing(true);
     await loadData(true);

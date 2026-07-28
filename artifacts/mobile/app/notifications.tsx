@@ -22,6 +22,7 @@ import { useColors } from "@/hooks/useColors";
 import { supabase } from "@/lib/supabase";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { cacheManager } from "@/services/cacheManager";
+import { useRealtimeNotifications } from "@/lib/realtimeNotifications";
 
 export const ANNOUNCEMENTS_LAST_SEEN_KEY = "announcements_last_seen";
 
@@ -158,6 +159,18 @@ export default function NotificationsScreen() {
       load();
     }, [load])
   );
+
+  // ── Live updates ──────────────────────────────────────────────────────────
+  // Without this the list only refreshed on focus, so anything published while
+  // the user sat on this screen never showed up.
+  useRealtimeNotifications(user?.id, {
+    onNotification: (n) => {
+      setItems((prev) => {
+        if (prev.some((x) => x.id === n.id)) return prev;
+        return [{ ...n, is_read: false }, ...prev];
+      });
+    },
+  });
 
   async function markRead(n: AppNotification) {
     setItems((prev) => prev.map((x) => (x.id === n.id ? { ...x, is_read: true } : x)));

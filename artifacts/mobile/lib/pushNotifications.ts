@@ -105,6 +105,13 @@ export async function registerForPushNotifications(userId: string): Promise<stri
       .filter(Boolean)
       .join(" | ");
 
+    // ── FIX ──────────────────────────────────────────────────────────────
+    // This used onConflict: "token", but the table is declared
+    // UNIQUE(user_id, token). Postgres rejects a conflict target that has no
+    // matching unique index ("no unique or exclusion constraint matching the
+    // ON CONFLICT specification"), so the upsert failed every time and no push
+    // token was ever stored — which is why push notifications never arrived.
+    // The migration adds a UNIQUE index on token alone; this matches it.
     const { error } = await supabase.from("push_tokens").upsert(
       {
         user_id: userId,

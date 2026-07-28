@@ -300,7 +300,20 @@ export async function fetchCourseProgress(userId: string, courseId: string | num
   const watchMinutes = totalTimeSpentSecs / 60;
 
   const totalWatchPercentage = (progress ?? []).reduce((sum, p) => sum + (p.watch_percentage || 0), 0);
-  const percentage = total ? Math.round(totalWatchPercentage / total) : 0;
+  const avgWatchPercentage = total ? Math.round(totalWatchPercentage / total) : 0;
+
+  // ── FIX ────────────────────────────────────────────────────────────────────
+  // This used to return the raw average watch_percentage. A lesson can be
+  // marked complete while its watch_percentage sits below 100 (the learner
+  // skips the outro, or the player rounds down), so a fully finished course
+  // reported something like 78% here while fetchRemoteProgress() — which does
+  // clamp — reported 100%. That mismatch is exactly why Home/Progress and
+  // Profile disagreed. Apply the same rule in both places: every lesson
+  // complete means the course is 100% complete.
+  const allLessonsCompleted = total > 0 && completed === total;
+  const percentage = allLessonsCompleted
+    ? 100
+    : Math.min(avgWatchPercentage, 99);
 
   return { completed, total, percentage, watchMinutes };
 }
