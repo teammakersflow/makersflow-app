@@ -13,18 +13,14 @@
       "resizeMode": "contain",
       "backgroundColor": "#0B6FAD"
     },
-    "runtimeVersion": {
-      "policy": "appVersion"
-    },
+    "runtimeVersion": "1.0.7",
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.makersflow.app",
       "infoPlist": {}
     },
     "android": {
-      "runtimeVersion": {
-        "policy": "appVersion"
-      },
+      "runtimeVersion": "1.0.7",
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/logos/icon.png",
         "backgroundColor": "#0B6FAD"
