@@ -94,8 +94,7 @@
         "android.permission.ACCESS_MEDIA_LOCATION",
         "android.permission.READ_EXTERNAL_STORAGE",
         "android.permission.WRITE_EXTERNAL_STORAGE"
-      ],
-      "runtimeVersion": "1.0.0"
+      ]
     },
     "web": {
       "bundler": "metro",
