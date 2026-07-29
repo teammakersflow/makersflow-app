@@ -430,34 +430,101 @@ export default function ProgressScreen() {
       ) : (
         <>
           {currentTab === "courses" && (
-            <View style={{ gap: 12 }}>
+            <View style={{ gap: 16 }}>
+              {/* Stats Summary Grid */}
+              <View style={{ flexDirection: "row", gap: 10 }}>
+                <View style={{ flex: 1, backgroundColor: colors.card, borderColor: colors.border, borderWidth: 1, borderRadius: 16, padding: 12, alignItems: "center" }}>
+                  <Ionicons name="time" size={20} color="#0B6FAD" />
+                  <Text style={{ fontSize: 15, fontFamily: "Inter_700Bold", color: colors.foreground, marginTop: 4 }}>
+                    {formatTotalTime(stats.totalTimeSpent)}
+                  </Text>
+                  <Text style={{ fontSize: 10, color: colors.mutedForeground, fontFamily: "Inter_500Medium" }}>Study Time</Text>
+                </View>
+                <View style={{ flex: 1, backgroundColor: colors.card, borderColor: colors.border, borderWidth: 1, borderRadius: 16, padding: 12, alignItems: "center" }}>
+                  <Ionicons name="checkmark-circle" size={20} color="#10B981" />
+                  <Text style={{ fontSize: 15, fontFamily: "Inter_700Bold", color: colors.foreground, marginTop: 4 }}>
+                    {stats.totalLessonsCompleted}
+                  </Text>
+                  <Text style={{ fontSize: 10, color: colors.mutedForeground, fontFamily: "Inter_500Medium" }}>Lessons Done</Text>
+                </View>
+                <View style={{ flex: 1, backgroundColor: colors.card, borderColor: colors.border, borderWidth: 1, borderRadius: 16, padding: 12, alignItems: "center" }}>
+                  <Ionicons name="ribbon" size={20} color="#F59E0B" />
+                  <Text style={{ fontSize: 15, fontFamily: "Inter_700Bold", color: colors.foreground, marginTop: 4 }}>
+                    {stats.coursesCompleted}
+                  </Text>
+                  <Text style={{ fontSize: 10, color: colors.mutedForeground, fontFamily: "Inter_500Medium" }}>Certificates</Text>
+                </View>
+              </View>
+
               {isLoadingCourses ? (
                 <ActivityIndicator color="#0B6FAD" style={{ marginTop: 20 }} />
               ) : coursesWithProgress.length > 0 ? (
-                // Show enrolled courses with progress bars
-                coursesWithProgress.map((c) => (
-                  <Pressable
-                    key={c.courseId}
-                    style={styles.courseProgressRowCard}
-                    onPress={() => router.push({ pathname: "/course/[id]", params: { id: c.courseId } })}
-                  >
-                    <Image source={c.thumbnail} style={styles.courseProgressThumbnail} />
-                    <View style={{ flex: 1 }}>
-                      <Text style={[styles.courseProgressTitle, { color: colors.foreground }]}>{c.courseTitle}</Text>
-                      <View style={styles.courseProgressRow}>
-                        <View style={[styles.courseProgressTrack, { backgroundColor: colors.muted }]}>
+                <>
+                  {/* Hero Active Course Card */}
+                  {coursesWithProgress[0] && (
+                    <View style={{ backgroundColor: colors.card, borderColor: colors.primary, borderWidth: 1.5, borderRadius: 18, padding: 16, gap: 12 }}>
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
+                        <Image source={coursesWithProgress[0].thumbnail} style={{ width: 54, height: 54, borderRadius: 12 }} />
+                        <View style={{ flex: 1 }}>
+                          <View style={{ backgroundColor: "rgba(11, 111, 173, 0.1)", paddingHorizontal: 8, paddingVertical: 2, borderRadius: 10, alignSelf: "flex-start", marginBottom: 4 }}>
+                            <Text style={{ fontSize: 10, fontFamily: "Inter_700Bold", color: "#0B6FAD" }}>ACTIVE COURSE</Text>
+                          </View>
+                          <Text style={{ fontSize: 15, fontFamily: "Inter_700Bold", color: colors.foreground }} numberOfLines={1}>
+                            {coursesWithProgress[0].courseTitle}
+                          </Text>
+                        </View>
+                      </View>
+                      <View style={{ gap: 6 }}>
+                        <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                          <Text style={{ fontSize: 12, color: colors.mutedForeground, fontFamily: "Inter_500Medium" }}>Course Progress</Text>
+                          <Text style={{ fontSize: 13, fontFamily: "Inter_700Bold", color: "#0B6FAD" }}>{coursesWithProgress[0].progress}%</Text>
+                        </View>
+                        <View style={{ height: 8, backgroundColor: colors.muted, borderRadius: 4, overflow: "hidden" }}>
                           <LinearGradient
                             colors={["#0B6FAD", "#17E5D3"]}
                             start={{ x: 0, y: 0 }}
                             end={{ x: 1, y: 0 }}
-                            style={[styles.courseProgressFill, { width: `${c.progress}%` }]}
+                            style={{ height: "100%", width: `${coursesWithProgress[0].progress}%` }}
                           />
                         </View>
-                        <Text style={styles.courseProgressPct}>{c.progress}%</Text>
                       </View>
+                      <Pressable
+                        style={{ backgroundColor: "#0B6FAD", borderRadius: 12, paddingVertical: 10, alignItems: "center", flexDirection: "row", justifyContent: "center", gap: 6 }}
+                        onPress={() => router.push({ pathname: "/course/[id]", params: { id: coursesWithProgress[0].courseId } })}
+                      >
+                        <Text style={{ color: "#FFF", fontSize: 13, fontFamily: "Inter_700Bold" }}>Continue Learning</Text>
+                        <Ionicons name="play" size={14} color="#FFF" />
+                      </Pressable>
                     </View>
-                  </Pressable>
-                ))
+                  )}
+
+                  <Text style={{ fontSize: 14, fontFamily: "Inter_700Bold", color: colors.foreground, marginTop: 4 }}>All Enrolled Courses</Text>
+
+                  {/* Enrolled courses with progress bars */}
+                  {coursesWithProgress.map((c) => (
+                    <Pressable
+                      key={c.courseId}
+                      style={styles.courseProgressRowCard}
+                      onPress={() => router.push({ pathname: "/course/[id]", params: { id: c.courseId } })}
+                    >
+                      <Image source={c.thumbnail} style={styles.courseProgressThumbnail} />
+                      <View style={{ flex: 1 }}>
+                        <Text style={[styles.courseProgressTitle, { color: colors.foreground }]}>{c.courseTitle}</Text>
+                        <View style={styles.courseProgressRow}>
+                          <View style={[styles.courseProgressTrack, { backgroundColor: colors.muted }]}>
+                            <LinearGradient
+                              colors={["#0B6FAD", "#17E5D3"]}
+                              start={{ x: 0, y: 0 }}
+                              end={{ x: 1, y: 0 }}
+                              style={[styles.courseProgressFill, { width: `${c.progress}%` }]}
+                            />
+                          </View>
+                          <Text style={styles.courseProgressPct}>{c.progress}%</Text>
+                        </View>
+                      </View>
+                    </Pressable>
+                  ))}
+                </>
               ) : (
                 // New user — show browse prompt
                 <View style={{ alignItems: "center", paddingVertical: 40, gap: 16 }}>

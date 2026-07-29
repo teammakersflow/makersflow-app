@@ -139,6 +139,19 @@ async function fetchCourses(): Promise<{ courses: any[]; popularCourses: any[] }
 }
 
 async function fetchProducts(): Promise<any[]> {
+  let reviewStats: Record<string, { ratingSum: number; count: number }> = {};
+  try {
+    const { data: revData } = await supabase.from('product_reviews').select('product_id, rating');
+    if (revData) {
+      revData.forEach((rev: any) => {
+        const id = String(rev.product_id);
+        if (!reviewStats[id]) reviewStats[id] = { ratingSum: 0, count: 0 };
+        reviewStats[id].ratingSum += Number(rev.rating) || 0;
+        reviewStats[id].count += 1;
+      });
+    }
+  } catch { /* non-critical */ }
+
   const { data, error } = await supabase
     .from('products')
     .select('id, title, description, price, original_price, category, subcategory, thumbnail_url, images, videos, in_stock')
@@ -173,6 +186,10 @@ async function fetchProducts(): Promise<any[]> {
       }
     }
 
+    const stats = reviewStats[String(row.id)];
+    const rating = stats ? Number((stats.ratingSum / stats.count).toFixed(1)) : 0;
+    const reviews = stats ? stats.count : 0;
+
     return {
       id: String(row.id),
       title: row.title || 'Untitled Product',
@@ -183,8 +200,8 @@ async function fetchProducts(): Promise<any[]> {
       thumbnail,
       images,
       description: row.description || 'No description available.',
-      rating: 0,
-      reviews: 0,
+      rating,
+      reviews,
       inStock: row.in_stock === undefined ? true : Boolean(row.in_stock),
       features: [],
     };
@@ -311,8 +328,9 @@ export const homeRepository = {
             unreadNotifCount: unreadNotifMeta?.data ?? 0,
           };
 
-          // Mixed-TTL: if private data is stale/expired, kick off a background refresh
-          const progressStale = !progressMeta || progressMeta.stale;
+          // Mixed-TTL: if private data is stale/expired or progress data is missing for a logged-in user, force refetch
+          const hasValidProgress = progressMeta && progressMeta.data && progressMeta.data.enrolledCourses && progressMeta.data.enrolledCourses.length > 0;
+          const progressStale = !progressMeta || progressMeta.stale || !hasValidProgress;
           const notificationsStale = !unreadNotifMeta || unreadNotifMeta.stale;
 
           if (userId && (progressStale || notificationsStale) && onBackgroundUpdate) {
@@ -449,5 +467,10 @@ export const homeRepository = {
       STORAGE_KEYS.CACHED_HOME_PROGRESS,
       STORAGE_KEYS.CACHED_HOME_NOTIFICATIONS,
     ]);
+  },
+
+  /** Invalidate progress cache so next screen load fetches fresh data. */
+  async invalidateProgressCache(): Promise<void> {
+    await cacheManager.clear(STORAGE_KEYS.CACHED_HOME_PROGRESS);
   },
 };

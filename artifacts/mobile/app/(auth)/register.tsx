@@ -16,6 +16,7 @@ import {
   View,
   Image,
   Alert,
+  Modal,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { SPACING } from "@/constants/spacing";
@@ -54,14 +55,17 @@ export default function RegisterScreen() {
   // ─────────────────────────────────────────────────────────────────────────
   const [grade, setGrade] = useState("");
   const [school, setSchool] = useState("");
+  const [age, setAge] = useState("");
   const [nameError, setNameError] = useState("");
   const [emailError, setEmailError] = useState("");
   const [passwordError, setPasswordError] = useState("");
   const [confirmError, setConfirmError] = useState("");
   const [gradeError, setGradeError] = useState("");
   const [schoolError, setSchoolError] = useState("");
+  const [ageError, setAgeError] = useState("");
   const [avatarUri, setAvatarUri] = useState<string | null>(null);
   const [pickerModalVisible, setPickerModalVisible] = useState(false);
+  const [gradePickerVisible, setGradePickerVisible] = useState(false);
 
   const [nameFocused, setNameFocused] = useState(false);
   const [emailFocused, setEmailFocused] = useState(false);
@@ -69,6 +73,7 @@ export default function RegisterScreen() {
   const [confirmFocused, setConfirmFocused] = useState(false);
   const [gradeFocused, setGradeFocused] = useState(false);
   const [schoolFocused, setSchoolFocused] = useState(false);
+  const [ageFocused, setAgeFocused] = useState(false);
   const [phone, setPhone] = useState("");
   const [phoneError, setPhoneError] = useState("");
   const [phoneFocused, setPhoneFocused] = useState(false);
@@ -379,12 +384,13 @@ export default function RegisterScreen() {
     }
     if (!grade) { setGradeError("Grade is required"); hasError = true; }
     if (!school) { setSchoolError("School is required"); hasError = true; }
+    const parsedAge = age.trim() ? parseInt(age.trim(), 10) : undefined;
     if (hasError) return;
 
     setLoading(true);
     await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 
-    const result = await register(name, email, password, grade, school, ("+91" + phone.trim()));
+    const result = await register(name, email, password, grade, school, ("+91" + phone.trim()), parsedAge);
     setLoading(false);
 
     if (result.success) {
@@ -668,10 +674,9 @@ export default function RegisterScreen() {
               <View style={{
                 flexDirection: "row", alignItems: "center", gap: 6,
                 backgroundColor: "#EEF7FF", borderRadius: 8,
-                paddingHorizontal: 10, paddingVertical: 8, marginRight: 8,
+                paddingHorizontal: 12, paddingVertical: 8, marginRight: 8,
                 borderRightWidth: 1, borderRightColor: "#D6E9F2",
               }}>
-                <Text style={{ fontSize: 16 }}>🇮🇳</Text>
                 <Text style={{ color: "#0B6FAD", fontSize: 14, fontFamily: "Inter_600SemiBold" }}>+91</Text>
               </View>
               <TextInput
@@ -693,27 +698,58 @@ export default function RegisterScreen() {
             {phoneError ? <Text style={styles.fieldError}>{phoneError}</Text> : null}
           </View>
 
-          {/* Grade field */}
+          {/* Age field */}
           <View style={styles.fieldGroup}>
-            <Text style={[styles.label, { color: colors.foreground }]}>Grade</Text>
+            <Text style={[styles.label, { color: colors.foreground }]}>Age</Text>
             <View style={[
               styles.inputWrapper,
               {
-                borderColor: gradeError ? "#DC2626" : (gradeFocused ? "#0B6FAD" : colors.border),
+                borderColor: ageError ? "#DC2626" : (ageFocused ? "#0B6FAD" : colors.border),
                 backgroundColor: colors.card,
               }
             ]}>
-              <Ionicons name="book" size={16} color="#0B6FAD" />
+              <Ionicons name="calendar-outline" size={16} color="#0B6FAD" />
               <TextInput
                 style={[styles.input, { color: colors.foreground }]}
-                value={grade}
-                onChangeText={(text) => { setGrade(text); setGradeError(""); }}
-                onFocus={() => setGradeFocused(true)}
-                onBlur={() => setGradeFocused(false)}
-                placeholder="e.g., 10th Grade"
+                value={age}
+                onChangeText={(text) => {
+                  const digits = text.replace(/[^0-9]/g, "").slice(0, 2);
+                  setAge(digits);
+                  setAgeError("");
+                }}
+                onFocus={() => setAgeFocused(true)}
+                onBlur={() => setAgeFocused(false)}
+                placeholder="e.g. 15"
                 placeholderTextColor={colors.mutedForeground}
+                keyboardType="number-pad"
+                maxLength={2}
               />
             </View>
+            {ageError ? <Text style={styles.fieldError}>{ageError}</Text> : null}
+          </View>
+
+          {/* Grade field - Structured Selector */}
+          <View style={styles.fieldGroup}>
+            <Text style={[styles.label, { color: colors.foreground }]}>Grade</Text>
+            <Pressable
+              style={[
+                styles.inputWrapper,
+                {
+                  borderColor: gradeError ? "#DC2626" : colors.border,
+                  backgroundColor: colors.card,
+                  justifyContent: "space-between",
+                }
+              ]}
+              onPress={() => setGradePickerVisible(true)}
+            >
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 10, flex: 1 }}>
+                <Ionicons name="book" size={16} color="#0B6FAD" />
+                <Text style={[styles.input, { color: grade ? colors.foreground : colors.mutedForeground, flex: 1 }]}>
+                  {grade || "Select your grade / class"}
+                </Text>
+              </View>
+              <Ionicons name="chevron-down" size={16} color={colors.mutedForeground} />
+            </Pressable>
             {gradeError ? <Text style={styles.fieldError}>{gradeError}</Text> : null}
           </View>
 
@@ -789,6 +825,49 @@ export default function RegisterScreen() {
         onSelectAvatar={(id) => setAvatarUri(id)}
         onClose={() => setPickerModalVisible(false)}
       />
+      <Modal
+        visible={gradePickerVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setGradePickerVisible(false)}
+      >
+        <Pressable
+          style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "center", alignItems: "center", padding: 20 }}
+          onPress={() => setGradePickerVisible(false)}
+        >
+          <View style={{ width: "100%", maxWidth: 340, backgroundColor: colors.card, borderRadius: 20, padding: 20, borderWidth: 1, borderColor: colors.border, gap: 12 }}>
+            <Text style={{ fontSize: 18, fontFamily: "Fredoka_700Bold", color: colors.foreground, textAlign: "center" }}>Select Grade / Class</Text>
+            {[
+              "6th Grade", "7th Grade", "8th Grade", "9th Grade",
+              "10th Grade", "11th Grade", "12th Grade",
+              "College / Undergraduate", "Other"
+            ].map((option) => (
+              <Pressable
+                key={option}
+                style={{
+                  paddingVertical: 12,
+                  paddingHorizontal: 16,
+                  borderRadius: 12,
+                  backgroundColor: grade === option ? "rgba(11, 111, 173, 0.1)" : "transparent",
+                  flexDirection: "row",
+                  alignItems: "center",
+                  justifyContent: "space-between"
+                }}
+                onPress={() => {
+                  setGrade(option);
+                  setGradeError("");
+                  setGradePickerVisible(false);
+                }}
+              >
+                <Text style={{ fontSize: 15, fontFamily: grade === option ? "Inter_700Bold" : "Inter_500Medium", color: grade === option ? "#0B6FAD" : colors.foreground }}>
+                  {option}
+                </Text>
+                {grade === option && <Ionicons name="checkmark" size={18} color="#0B6FAD" />}
+              </Pressable>
+            ))}
+          </View>
+        </Pressable>
+      </Modal>
     </KeyboardAvoidingView>
   );
 }

@@ -423,31 +423,21 @@ export default function CertificateScreen() {
           try {
             const asset = Asset.fromModule(module);
             await asset.downloadAsync();
-            const uri = asset.localUri || asset.uri;
-            if (uri) {
-              if (Platform.OS !== 'web' && uri.startsWith('file://')) {
-                const base64Data = await FileSystem.readAsStringAsync(uri, {
-                  encoding: FileSystem.EncodingType.Base64,
-                });
-                const extension = uri.split('.').pop()?.toLowerCase() || 'png';
-                const mime =
-                  extension === 'jpg' || extension === 'jpeg' ? 'image/jpeg' : 'image/png';
-                return `data:${mime};base64,${base64Data}`;
-              } else {
-                try {
-                  const response = await fetch(uri);
-                  const blob = await response.blob();
-                  return await new Promise<string>((resolve) => {
-                    const reader = new FileReader();
-                    reader.onloadend = () => resolve((reader.result as string) || uri);
-                    reader.onerror = () => resolve(uri);
-                    reader.readAsDataURL(blob);
-                  });
-                } catch (fetchErr) {
-                  console.warn('[Certificate] Web fetch base64 fallback:', fetchErr);
-                  return uri;
-                }
+            const uri = asset.localUri || asset.uri || '';
+            console.log('[Certificate Asset Debug]', { localUri: asset.localUri, uri: asset.uri });
+            if (uri && Platform.OS !== 'web') {
+              let targetUri = uri;
+              if (!targetUri.startsWith('file://')) {
+                const localFile = `${FileSystem.cacheDirectory}cert_asset_${Date.now()}_${Math.random().toString(36).substring(7)}.png`;
+                await FileSystem.downloadAsync(uri, localFile);
+                targetUri = localFile;
               }
+              const base64Data = await FileSystem.readAsStringAsync(targetUri, {
+                encoding: FileSystem.EncodingType.Base64,
+              });
+              const extension = uri.split('.').pop()?.toLowerCase() || 'png';
+              const mime = extension === 'jpg' || extension === 'jpeg' ? 'image/jpeg' : 'image/png';
+              return `data:${mime};base64,${base64Data}`;
             }
             return uri || TRANSPARENT_1X1_PNG;
           } catch (err) {

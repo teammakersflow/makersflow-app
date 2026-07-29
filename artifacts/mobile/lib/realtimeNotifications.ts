@@ -51,6 +51,20 @@ export function subscribeToNotifications(
 ): () => void {
   if (!userId) return () => {};
 
+  // Per-subscription deduplication cache: scoped to this specific channel instance
+  const seenInChannel = new Set<string>();
+
+  const emitNotification = (n: RealtimeNotification) => {
+    if (seenInChannel.has(n.id)) {
+      if (__DEV__) console.log('[Realtime] Duplicate notification skipped for channel subscriber:', n.id);
+      return;
+    }
+    seenInChannel.add(n.id);
+    setTimeout(() => seenInChannel.delete(n.id), 10000);
+    handlers.onNotification?.(n);
+    handlers.onChange?.();
+  };
+
   const channel: RealtimeChannel = supabase
     .channel(`notifications:${userId}`)
     // ── Personal notifications ───────────────────────────────────────────
@@ -64,7 +78,7 @@ export function subscribeToNotifications(
       },
       (payload) => {
         const row = payload.new as Record<string, unknown>;
-        handlers.onNotification?.({
+        emitNotification({
           id: String(row.id),
           title: String(row.title ?? 'Notification'),
           body: (row.body as string) ?? null,
@@ -72,7 +86,6 @@ export function subscribeToNotifications(
           link: (row.link as string) ?? null,
           created_at: String(row.created_at ?? new Date().toISOString()),
         });
-        handlers.onChange?.();
       }
     )
     // ── Broadcast announcements ──────────────────────────────────────────
@@ -84,7 +97,7 @@ export function subscribeToNotifications(
       (payload) => {
         const row = payload.new as Record<string, unknown>;
         if (row.status !== 'published') return;
-        handlers.onNotification?.({
+        emitNotification({
           id: `ann-${row.id}`,
           title: String(row.title ?? 'Announcement'),
           body: (row.message as string) ?? null,
@@ -93,7 +106,6 @@ export function subscribeToNotifications(
           created_at: String(row.created_at ?? new Date().toISOString()),
           isAnnouncement: true,
         });
-        handlers.onChange?.();
       }
     )
     .on(
@@ -104,7 +116,7 @@ export function subscribeToNotifications(
         const prev = payload.old as Record<string, unknown>;
         // Only fire on the draft → published transition, never on later edits.
         if (row.status !== 'published' || prev?.status === 'published') return;
-        handlers.onNotification?.({
+        emitNotification({
           id: `ann-${row.id}`,
           title: String(row.title ?? 'Announcement'),
           body: (row.message as string) ?? null,
@@ -113,7 +125,6 @@ export function subscribeToNotifications(
           created_at: String(row.created_at ?? new Date().toISOString()),
           isAnnouncement: true,
         });
-        handlers.onChange?.();
       }
     );
 

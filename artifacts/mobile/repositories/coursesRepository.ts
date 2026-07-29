@@ -185,8 +185,8 @@ export const coursesRepository = {
             enrollments: cachedEnrollments,
           };
 
-          // Mixed-TTL: if enrollments cache is stale/expired, kick off background refetch
-          const enrollmentsStale = userId && (!enrollmentsResult || enrollmentsResult.stale);
+          // Mixed-TTL: if enrollments cache is stale/expired or empty for a logged-in user, kick off background refetch
+          const enrollmentsStale = userId && (!enrollmentsResult || enrollmentsResult.stale || cachedEnrollments.length === 0);
 
           if (userId && enrollmentsStale && onBackgroundUpdate) {
             fetchEnrollments(userId)
@@ -261,6 +261,11 @@ export const coursesRepository = {
 
   /** Clear only user-specific caches. Called on logout. */
   async clearUserCache(): Promise<void> {
+    await cacheManager.clear(STORAGE_KEYS.CACHED_COURSES_ENROLLMENTS);
+  },
+
+  /** Invalidate enrollments cache so next screen load fetches fresh data. */
+  async invalidateEnrollmentsCache(): Promise<void> {
     await cacheManager.clear(STORAGE_KEYS.CACHED_COURSES_ENROLLMENTS);
   },
 };

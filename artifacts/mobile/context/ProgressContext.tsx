@@ -10,6 +10,8 @@ import {
 } from "@/lib/progressStorage";
 import { ProgressCalculator } from "@/lib/progressCalculator";
 import * as courseDataProvider from "@/services/courseDataProvider";
+import { homeRepository } from "@/repositories/homeRepository";
+import { coursesRepository } from "@/repositories/coursesRepository";
 
 interface ProgressContextType {
   courseProgress: Map<string, UserCourseProgress>;
@@ -97,6 +99,13 @@ export function ProgressProvider({ children }: { children: React.ReactNode }) {
     return progress?.modules[moduleId] || null;
   }
 
+  async function invalidateRepositories() {
+    await Promise.all([
+      homeRepository.invalidateProgressCache().catch(() => {}),
+      coursesRepository.invalidateEnrollmentsCache().catch(() => {}),
+    ]);
+  }
+
   async function enrollCourse(courseId: string): Promise<void> {
     if (!user?.id) return;
 
@@ -138,6 +147,7 @@ export function ProgressProvider({ children }: { children: React.ReactNode }) {
 
     await ProgressStorage.saveCourseProgress(newProgress);
     setCourseProgress(new Map(courseProgress.set(courseId, newProgress)));
+    await invalidateRepositories();
   }
 
   async function updateVideoProgress(
@@ -149,11 +159,13 @@ export function ProgressProvider({ children }: { children: React.ReactNode }) {
   ): Promise<void> {
     if (!user?.id) return;
     await loadAllProgress();
+    await invalidateRepositories();
   }
 
   async function completeModule(courseId: string, moduleId: string): Promise<void> {
     if (!user?.id) return;
     await loadAllProgress();
+    await invalidateRepositories();
   }
 
   async function updateWatchlist(

@@ -393,6 +393,16 @@ export default function LearnScreen() {
       });
 
       setDownloadedMap((prev) => ({ ...prev, [target.id]: savedPath }));
+      if (user?.id) {
+        addDownloadedLesson({
+          courseId,
+          moduleId: target.id,
+          lessonId: target.id,
+          courseTitle: course.title,
+          lessonTitle: target.title,
+          courseThumbnail: course.thumbnail,
+        }).catch(() => {});
+      }
       if (target.id === activeModule?.id) {
         setDownloadedPathState(savedPath);
       }
@@ -589,7 +599,7 @@ export default function LearnScreen() {
               <RNActivityIndicator size="small" color="#0B6FAD" />
               {downloadProgress !== null && (
                 <Text style={{ fontSize: 9, color: "#0B6FAD", fontFamily: "Inter_400Regular" }}>
-                  {Math.round(downloadProgress * 100)}%
+                  {Math.round(downloadProgress)}%
                 </Text>
               )}
             </View>
@@ -965,10 +975,10 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     gap: 8,
   },
-  backBtn: { width: 40, height: 40, alignItems: "center", justifyContent: "center" },
-  watchLaterBtn: { width: 40, height: 40, alignItems: "center", justifyContent: "center" },
-  downloadBtn: { width: 40, height: 40, alignItems: "center", justifyContent: "center" },
-  shareBtn: { width: 40, height: 40, alignItems: "center", justifyContent: "center" },
+  backBtn: { width: 44, height: 44, borderRadius: 22, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(11, 111, 173, 0.08)" },
+  watchLaterBtn: { width: 44, height: 44, borderRadius: 22, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(11, 111, 173, 0.08)" },
+  downloadBtn: { width: 44, height: 44, borderRadius: 22, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(11, 111, 173, 0.08)" },
+  shareBtn: { width: 44, height: 44, borderRadius: 22, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(11, 111, 173, 0.08)" },
   headerTitle: { flex: 1, fontSize: 17, fontFamily: "Fredoka_700Bold", textAlign: "center" },
   
   courseHeader: {

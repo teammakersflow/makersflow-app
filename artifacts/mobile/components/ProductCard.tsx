@@ -35,7 +35,7 @@ export const ProductCard = React.memo(function ProductCard({ product, onAddedToC
 
   const renderStars = (rating: number) => {
     const stars = [];
-    const fullStars = Math.floor(rating || 4.5);
+    const fullStars = Math.floor(rating || 0);
     for (let i = 1; i <= 5; i++) {
       stars.push(
         <Ionicons
@@ -195,19 +195,21 @@ export const ProductCard = React.memo(function ProductCard({ product, onAddedToC
           {product.title}
         </Text>
 
-        <View style={styles.ratingRow}>
-          <View style={styles.starsContainer}>
-            {renderStars(product.rating || 0)}
-          </View>
-          {isFlat && (
-            <Text style={[styles.ratingNumber, { color: colors.mutedForeground }]}>
-              {product.rating || 4.5}
+        {product.reviews > 0 && product.rating > 0 ? (
+          <View style={styles.ratingRow}>
+            <View style={styles.starsContainer}>
+              {renderStars(product.rating)}
+            </View>
+            {isFlat && (
+              <Text style={[styles.ratingNumber, { color: colors.mutedForeground }]}>
+                {product.rating}
+              </Text>
+            )}
+            <Text style={[styles.reviews, { color: colors.mutedForeground }]}>
+              ({product.reviews})
             </Text>
-          )}
-          <Text style={[styles.reviews, { color: colors.mutedForeground }]}>
-            {product.reviews > 0 ? `(${product.reviews})` : "(0)"}
-          </Text>
-        </View>
+          </View>
+        ) : null}
 
         <View style={styles.priceRow}>
           <View style={styles.priceGroup}>

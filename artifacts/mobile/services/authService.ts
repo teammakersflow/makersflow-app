@@ -17,13 +17,15 @@ export async function signInWithPassword(email: string, password: string) {
 export async function signUp(
   email: string,
   password: string,
-  metadata?: { name?: string; grade?: string; school?: string; phone?: string },
+  metadata?: { name?: string; grade?: string; school?: string; phone?: string; age?: number },
+  redirectTo?: string
 ) {
   return await supabase.auth.signUp({
     email,
     password,
     options: {
       data: metadata,
+      emailRedirectTo: redirectTo,
     },
   });
 }

@@ -104,11 +104,14 @@ export default function NewsDetailScreen() {
             <Text style={[styles.meta, TEXT_STYLES.meta, { color: colors.mutedForeground }]}>{item.readTime}</Text>
           </View>
 
-          <View style={[styles.summaryBox, { backgroundColor: colors.accent, borderLeftColor: colors.primary }]}>
-            <Text style={[styles.summaryText, TEXT_STYLES.description, { color: colors.primary, fontWeight: "600" }]}>
-              {item.summary}
-            </Text>
-          </View>
+          {/* Render summaryBox ONLY IF summary is a distinct excerpt, not a duplicate prefix of content */}
+          {item.summary && !item.content.trim().startsWith(item.summary.replace("...", "").trim()) ? (
+            <View style={[styles.summaryBox, { backgroundColor: colors.accent, borderLeftColor: colors.primary }]}>
+              <Text style={[styles.summaryText, TEXT_STYLES.description, { color: colors.primary, fontWeight: "600" }]}>
+                {item.summary}
+              </Text>
+            </View>
+          ) : null}
 
           <Text style={[styles.body, TEXT_STYLES.description, { color: colors.foreground, fontSize: 15, lineHeight: 24 }]}>
             {item.content}

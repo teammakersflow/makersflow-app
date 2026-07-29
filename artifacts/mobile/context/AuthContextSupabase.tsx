@@ -56,7 +56,8 @@ interface AuthContextType {
     password: string,
     grade?: string,
     school?: string,
-    phone?: string
+    phone?: string,
+    age?: number
   ) => Promise<{ success: boolean; needsEmailVerification?: boolean; error?: string }>;
   loginWithGoogle: () => Promise<{ success: boolean; error?: string }>;
   logout: () => Promise<void>;
@@ -287,7 +288,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setSession(session);
 
       if (_event === 'PASSWORD_RECOVERY') {
-        router.push('/(auth)/reset-password');
+        router.push('/reset-password');
       }
 
       // A fresh sign-in (email / Google / OTP) claims this device as the
@@ -308,11 +309,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
 
     // Handle deep links for OAuth callback and password reset
-    const handleDeepLink = (event: { url: string }) => {
+    const handleDeepLink = async (event: { url: string }) => {
       const url = event.url;
       devLog('[Auth] Deep link received:', url);
-      if (url.includes('reset-password') || url.includes('type=recovery')) {
-        router.push('/(auth)/reset-password');
+      // Exclude OAuth callbacks (auth/callback) which are handled inside loginWithGoogle()
+      if (!url.includes('auth/callback') && (url.includes('reset-password') || url.includes('type=recovery'))) {
+        const queryString = url.includes('?') ? url.split('?')[1].split('#')[0] : '';
+        const fragmentString = url.includes('#') ? url.split('#')[1] : '';
+        const params = new URLSearchParams(queryString || fragmentString);
+        const code = params.get('code');
+        const access_token = params.get('access_token');
+        const refresh_token = params.get('refresh_token');
+
+        if (code) {
+          await supabase.auth.exchangeCodeForSession(code).catch((err) => devError('[Auth] PKCE exchange err:', err));
+        } else if (access_token && refresh_token) {
+          await authService.setSession(access_token, refresh_token).catch((err) => devError('[Auth] setSession err:', err));
+        }
+        router.push('/reset-password');
       }
     };
 
@@ -522,12 +536,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     password: string,
     grade?: string,
     school?: string,
-    phone?: string
+    phone?: string,
+    age?: number
   ): Promise<{ success: boolean; needsEmailVerification?: boolean; error?: string }> {
     try {
       setIsLoading(true);
 
-      const { data, error } = await authService.signUp(email, password, { name, grade, school, phone });
+      const redirectTo = Linking.createURL('login', { scheme: 'makersflow' });
+      const { data, error } = await authService.signUp(email, password, { name, grade, school, phone, age }, redirectTo);
 
       if (error) {
         devError('[Auth] Registration error:', error);
@@ -544,7 +560,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               full_name: name,
               grade,
               school,
-              phone
+              phone,
+              age
             })
             .eq('id', data.user.id);
           if (profileErr) {
@@ -803,7 +820,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       const { error } = await authService.resetPasswordForEmail(
         email,
-        Linking.createURL('(auth)/reset-password', { scheme: 'makersflow' })
+        Linking.createURL('reset-password', { scheme: 'makersflow' })
       );
 
       if (error) {

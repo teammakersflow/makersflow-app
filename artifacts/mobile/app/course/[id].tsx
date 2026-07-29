@@ -41,6 +41,8 @@ import { enrollInCourse, isEnrolled as checkEnrollment, getEnrollment, isExpired
 import { fetchCourseLessonsProgress } from "@/lib/progressStorage";
 import { fetchCourseReviews, fetchMyReview, upsertReview } from "@/services/reviewService";
 import { parseThumbnailUrls } from "@/lib/thumbnailUtils";
+import { homeRepository } from "@/repositories/homeRepository";
+import { coursesRepository } from "@/repositories/coursesRepository";
 
 export default function CourseDetailScreen() {
   const colors = useColors();
@@ -138,8 +140,8 @@ export default function CourseDetailScreen() {
             ? { uri: images[0] }
             : require('@/assets/images/courses/course_robotics.webp'),
           instructor: "MakersFlow Instructor",
-          rating: 4.8,
-          reviews: 120,
+          rating: 0,
+          reviews: 0,
           description: courseData.description || "",
           tags: [courseData.category || "Robotics"],
         };
@@ -174,8 +176,8 @@ export default function CourseDetailScreen() {
             ? { uri: images[0] }
             : require('@/assets/images/courses/course_robotics.webp'),
           instructor: "MakersFlow Instructor",
-          rating: 4.8,
-          reviews: 120,
+          rating: 0,
+          reviews: 0,
           description: cachedCourse.description || "",
           tags: [cachedCourse.category || "Robotics"],
         };
@@ -183,7 +185,6 @@ export default function CourseDetailScreen() {
       }
     } finally {
       if (!cancelledRef.current) {
-        setIsLoading(false);
         setRefreshing(false);
       }
     }
@@ -199,18 +200,14 @@ export default function CourseDetailScreen() {
         if (cancelledRef.current) return;
 
         // 1. Modules
-        // ── FIX ──────────────────────────────────────────────────────────
-        // `m.lessons.map(...)` threw whenever a module came back with a null
-        // `lessons` array (a module with no lessons yet, or an RLS-filtered
-        // row). The throw happened inside this .then(), so setModules() never
-        // ran and `modules` stayed []. That is why the header rendered
-        // Lessons "—" and Duration "Self-paced" on a course that genuinely has
-        // 28 lessons / 239 mins. Guard the array, and fall back to the
-        // course-level counts when the modules query fails outright.
         if (modulesRes.status === 'fulfilled' && Array.isArray(modulesRes.value)) {
-          const modulesData = modulesRes.value;
-          const flatLessons = modulesData.flatMap((m: any) =>
-            (m?.lessons ?? []).map((l: any) => ({
+          const rawModules = modulesRes.value;
+          const sanitizedModules = rawModules.map((m: any) => ({
+            ...m,
+            lessons: Array.isArray(m.lessons) ? m.lessons : [],
+          }));
+          const flatLessons = sanitizedModules.flatMap((m: any) =>
+            m.lessons.map((l: any) => ({
               id: l.id,
               title: l.title,
               duration: l.duration_minutes ? `${l.duration_minutes} mins` : "0 mins",
@@ -218,11 +215,6 @@ export default function CourseDetailScreen() {
             }))
           );
           setModules(flatLessons);
-          if (flatLessons.length === 0) {
-            console.warn('[course] modules returned no lessons for course', id);
-          }
-        } else if (modulesRes.status === 'rejected') {
-          console.warn('[course] getCourseModules failed:', modulesRes.reason);
         }
 
         // 2. Course Reviews
@@ -261,6 +253,10 @@ export default function CourseDetailScreen() {
           } else {
             setEnrollment(null);
           }
+        }
+
+        if (!cancelledRef.current) {
+          setIsLoading(false);
         }
       }
     );
@@ -426,6 +422,10 @@ export default function CourseDetailScreen() {
         }
 
         await enrollInCourse(user.id, course.id, course.isFree);
+        await Promise.all([
+          homeRepository.invalidateProgressCache().catch(() => {}),
+          coursesRepository.invalidateEnrollmentsCache().catch(() => {}),
+        ]);
         setIsEnrolled(true);
 
         const progressData = await fetchCourseLessonsProgress(user.id, course.id);

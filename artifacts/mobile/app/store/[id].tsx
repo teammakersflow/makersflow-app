@@ -144,7 +144,7 @@ function mapSupabaseProduct(row: any): Product {
     thumbnail,
     images,
     description: row.description || "No description available.",
-    rating: Number(row.rating) || 4.5,
+    rating: Number(row.rating) || 0,
     reviews: Number(row.total_reviews) || 0,
     inStock: row.in_stock === undefined ? true : Boolean(row.in_stock),
     badge: row.badge || undefined,

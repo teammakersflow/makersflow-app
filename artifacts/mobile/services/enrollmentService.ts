@@ -1,5 +1,18 @@
 import { supabase } from '@/lib/supabase';
 
+async function invalidateCaches() {
+  try {
+    const { homeRepository } = require('@/repositories/homeRepository');
+    const { coursesRepository } = require('@/repositories/coursesRepository');
+    await Promise.all([
+      homeRepository.invalidateProgressCache().catch(() => {}),
+      coursesRepository.invalidateEnrollmentsCache().catch(() => {}),
+    ]);
+  } catch (e) {
+    // non-fatal
+  }
+}
+
 export async function enrollInCourse(userId: string, courseId: string | number, isFree: boolean) {
   const expiresAt = new Date();
   expiresAt.setFullYear(expiresAt.getFullYear() + 1);
@@ -16,17 +29,22 @@ export async function enrollInCourse(userId: string, courseId: string | number, 
     );
 
   const { error } = await doUpsert(isFree ? 'completed' : 'pending');
-  if (!error) return;
+  if (!error) {
+    await invalidateCaches();
+    return;
+  }
 
-  // BUG FIX (error 23514, enrollments_payment_status_check): some databases
-  // carry a legacy CHECK constraint that doesn't allow 'completed'. Retry with
-  // the common legacy value so free enrollment still works; the permanent fix
-  // is FIX_ENROLLMENT_CONSTRAINT.sql.
   if (error.code === '23514' && isFree) {
     const { error: retryError } = await doUpsert('paid');
-    if (!retryError) return;
+    if (!retryError) {
+      await invalidateCaches();
+      return;
+    }
     const { error: retryError2 } = await doUpsert('free');
-    if (!retryError2) return;
+    if (!retryError2) {
+      await invalidateCaches();
+      return;
+    }
     throw retryError2;
   }
   throw error;
@@ -102,21 +120,40 @@ export function isExpired(enrollment: any): boolean {
 }
 
 export async function completeCourse(userId: string, courseId: string | number) {
-  const { data: enrollment, error: fetchError } = await supabase
-    .from('enrollments')
-    .select('completed_at')
-    .eq('user_id', userId)
-    .eq('course_id', Number(courseId))
-    .maybeSingle();
+  const now = new Date().toISOString();
+  const cId = Number(courseId);
 
-  if (fetchError) throw fetchError;
-
-  if (enrollment && !enrollment.completed_at) {
-    const { error: updateError } = await supabase
+  try {
+    // 1. Try updating existing enrollment row
+    const { data, error } = await supabase
       .from('enrollments')
-      .update({ completed_at: new Date().toISOString() })
+      .update({ completed_at: now })
       .eq('user_id', userId)
-      .eq('course_id', Number(courseId));
-    if (updateError) throw updateError;
+      .eq('course_id', cId)
+      .select();
+
+    // 2. If no existing row was updated, insert new completed enrollment
+    if (!error && (!data || data.length === 0)) {
+      await supabase
+        .from('enrollments')
+        .insert({
+          user_id: userId,
+          course_id: cId,
+          completed_at: now,
+          payment_status: 'completed',
+        });
+    }
+  } catch (err) {
+    console.warn('[EnrollmentService] completeCourse error:', err);
+  }
+
+  // Clear repository caches so UI updates reactively across all screens
+  try {
+    const { invalidateProgressCache } = require('@/repositories/homeRepository');
+    const { invalidateEnrollmentsCache } = require('@/repositories/coursesRepository');
+    invalidateProgressCache();
+    invalidateEnrollmentsCache();
+  } catch (e) {
+    // Ignore require cycle fallback
   }
 }

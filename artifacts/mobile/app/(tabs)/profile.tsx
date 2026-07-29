@@ -26,6 +26,7 @@ import { useProgress } from "@/context/ProgressContext";
 import { useColors } from "@/hooks/useColors";
 import { supabase } from "@/lib/supabase";
 import { getCourseModules } from "@/services/courseDataProvider";
+import { completeCourse } from "@/services/enrollmentService";
 import { ProductCard } from "@/components/ProductCard";
 import { CertificateSkeleton, WishlistSkeleton } from "@/components/SkeletonLoader";
 import { Product } from "@/data/mockData";
@@ -236,10 +237,12 @@ export default function ProfileScreen() {
 
             const allDone = allLessonIds.every((id: string) => completedIds.includes(id));
             if (allDone) {
+              // Auto-persist completed_at to DB so future queries find it on the enrollment row
+              completeCourse(user.id, courseId).catch(() => {});
               results.push({
                 courseId,
                 courseTitle,
-                completedAt: enr.enrolled_at ?? new Date().toISOString(),
+                completedAt: enr.enrolled_at ?? '',
                 level,
                 instructor,
               });
@@ -520,12 +523,18 @@ export default function ProfileScreen() {
       {/* Stats Strip */}
       <View style={[styles.statsRow, { backgroundColor: colors.card, borderColor: colors.border }]}>
         <View style={styles.stat}>
-          <Text style={styles.statNum}>{enrolledCount}</Text>
+          {certsLoading ? (
+            <ActivityIndicator size="small" color="#0B6FAD" />
+          ) : (
+            <Text style={styles.statNum}>{enrolledCount}</Text>
+          )}
           <Text style={styles.statLabel}>Enrolled</Text>
         </View>
         <View style={[styles.statDivider, { backgroundColor: "#D6E9F2" }]} />
         <View style={styles.stat}>
-          {avgProgress === 0 ? (
+          {certsLoading ? (
+            <ActivityIndicator size="small" color="#0B6FAD" />
+          ) : avgProgress === 0 ? (
             <>
               <Text style={styles.statNum}>-</Text>
               <Text style={styles.statLabel}>Start Now</Text>
@@ -539,7 +548,11 @@ export default function ProfileScreen() {
         </View>
         <View style={[styles.statDivider, { backgroundColor: "#D6E9F2" }]} />
         <View style={styles.stat}>
-          <Text style={styles.statNum}>{completedCourses.length}</Text>
+          {certsLoading ? (
+            <ActivityIndicator size="small" color="#0B6FAD" />
+          ) : (
+            <Text style={styles.statNum}>{completedCourses.length}</Text>
+          )}
           <Text style={styles.statLabel}>Certificates</Text>
         </View>
       </View>
