@@ -22,6 +22,7 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { SPACING } from "@/constants/spacing";
 import { useAuth } from "@/context/AuthContextSupabase";
+import { AUTH_FEATURE_FLAGS } from "@/lib/auth/authFeatureFlags";
 import { useProgress } from "@/context/ProgressContext";
 import { useColors } from "@/hooks/useColors";
 import { supabase } from "@/lib/supabase";
@@ -321,11 +322,13 @@ export default function ProfileScreen() {
     setIsDeleting(true);
     setDeleteError("");
     try {
-      const { error } = await supabase.auth.signInWithPassword({
-        email: user?.email ?? "",
-        password: deletePassword,
-      });
-      if (error) throw error;
+      if (!AUTH_FEATURE_FLAGS.USE_CUSTOM_BACKEND_AUTH) {
+        const { error } = await supabase.auth.signInWithPassword({
+          email: user?.email ?? "",
+          password: deletePassword,
+        });
+        if (error) throw error;
+      }
       setDeleteStep("confirm");
     } catch (err: any) {
       setDeleteError(err.message || "Incorrect password");

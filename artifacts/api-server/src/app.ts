@@ -4,6 +4,11 @@ import pinoHttp from "pino-http";
 import router from "./routes";
 import { rateLimit } from "./middlewares/rateLimit";
 import { logger } from "./lib/logger";
+import { loadAndValidateConfig } from "./config/authConfig";
+import { globalErrorHandler } from "./middlewares/errorHandler";
+
+// Fail-fast configuration validation at server startup
+loadAndValidateConfig();
 
 const app: Express = express();
 
@@ -40,6 +45,11 @@ const rateLimitWindowMs = Number(process.env.RATE_LIMIT_WINDOW_MS) || 60_000;
 const rateLimitMax = Number(process.env.RATE_LIMIT_MAX_REQUESTS) || 120;
 app.use(rateLimit({ windowMs: rateLimitWindowMs, max: rateLimitMax }));
 
+// Mount router at both root and /api for compatibility
+app.use(router);
 app.use("/api", router);
+
+// Global Error Handler
+app.use(globalErrorHandler);
 
 export default app;

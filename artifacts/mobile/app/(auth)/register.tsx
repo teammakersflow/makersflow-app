@@ -40,7 +40,7 @@ function getPasswordStrength(pass: string) {
 export default function RegisterScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
-  const { register, loginWithGoogle } = useAuth();
+  const { user, register, loginWithGoogle } = useAuth();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -417,9 +417,8 @@ export default function RegisterScreen() {
       // Auto-confirm is ON — a session was created immediately. Proceed as before.
       if (avatarUri) {
         try {
-          const { data: { user: supabaseUser } } = await supabase.auth.getUser();
-          if (supabaseUser) {
-            await setProfileAvatar(supabaseUser.id);
+          if (user?.id) {
+            await setProfileAvatar(user.id);
           }
         } catch (uploadErr) {
           console.error("Avatar update failed:", uploadErr);

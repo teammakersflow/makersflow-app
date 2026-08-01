@@ -24,6 +24,8 @@ Alert.alert = (title: string, message?: string, buttons?: any[]) => {
 
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { AuthProvider, useAuth } from "@/context/AuthContextSupabase";
+import { AuthProviderCustom } from "@/context/AuthContextCustom";
+import { AUTH_FEATURE_FLAGS } from "@/lib/auth/authFeatureFlags";
 import { AuthRequireProvider } from "@/context/AuthRequireContext";
 import { ProtectedRoute } from "@/components/ProtectedRoute";
 import { AppGate } from "@/components/AppGate";
@@ -181,21 +183,39 @@ export default function RootLayout() {
           <GestureHandlerRootView style={{ flex: 1 }}>
             <KeyboardProvider>
               <NetworkProvider>
-                <AuthProvider>
-                  <AuthRequireProvider>
-                    <ProtectedRoute>
-                      <CartProvider>
-                        <FavoritesProvider>
-                          <ProgressProvider>
-                            <AppGate>
-                              <RootLayoutNav />
-                            </AppGate>
-                          </ProgressProvider>
-                        </FavoritesProvider>
-                      </CartProvider>
-                    </ProtectedRoute>
-                  </AuthRequireProvider>
-                </AuthProvider>
+                {AUTH_FEATURE_FLAGS.USE_CUSTOM_BACKEND_AUTH ? (
+                  <AuthProviderCustom>
+                    <AuthRequireProvider>
+                      <ProtectedRoute>
+                        <CartProvider>
+                          <FavoritesProvider>
+                            <ProgressProvider>
+                              <AppGate>
+                                <RootLayoutNav />
+                              </AppGate>
+                            </ProgressProvider>
+                          </FavoritesProvider>
+                        </CartProvider>
+                      </ProtectedRoute>
+                    </AuthRequireProvider>
+                  </AuthProviderCustom>
+                ) : (
+                  <AuthProvider>
+                    <AuthRequireProvider>
+                      <ProtectedRoute>
+                        <CartProvider>
+                          <FavoritesProvider>
+                            <ProgressProvider>
+                              <AppGate>
+                                <RootLayoutNav />
+                              </AppGate>
+                            </ProgressProvider>
+                          </FavoritesProvider>
+                        </CartProvider>
+                      </ProtectedRoute>
+                    </AuthRequireProvider>
+                  </AuthProvider>
+                )}
               </NetworkProvider>
             </KeyboardProvider>
           </GestureHandlerRootView>

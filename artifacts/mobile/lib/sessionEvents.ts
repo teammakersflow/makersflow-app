@@ -30,7 +30,9 @@ export function isAuthError(error: any): boolean {
   if (!error) return false;
   const msg = String(error.message ?? "").toLowerCase();
   const code = String(error.code ?? "");
+  const status = error.status;
   return (
+    status === 401 ||
     code === "PGRST301" || // JWT expired
     code === "401" ||
     msg.includes("jwt") ||
