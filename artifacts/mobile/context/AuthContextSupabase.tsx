@@ -16,6 +16,9 @@ import { profileCache } from '@/services/profileCache';
 import { STORAGE_KEYS } from '@/constants/storageKeys';
 import { homeRepository } from '@/repositories/homeRepository';
 import { coursesRepository } from '@/repositories/coursesRepository';
+import { GoogleAuthProvider } from '@/lib/auth/authProviders';
+import { tokenStorage } from '@/lib/auth/tokenStorage';
+
 
 // Configure WebBrowser for OAuth
 WebBrowser.maybeCompleteAuthSession();
@@ -434,95 +437,59 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       devLog('[Auth] Starting Google OAuth flow...');
       setIsLoading(true);
 
-      // Build the redirect URI using the registered custom scheme so it
-      // resolves to makersflow://auth/callback in every runtime (Expo Go,
-      // development build, and standalone). Without { scheme } Expo Go
-      // substitutes its own exp:// or http://localhost origin.
-      const redirectTo = Linking.createURL('auth/callback', { scheme: 'makersflow' });
-      devLog('[Auth] OAuth redirect URL:', redirectTo);
+      const googleProvider = new GoogleAuthProvider();
+      const credentials = await googleProvider.authenticate();
 
-      const { data, error } = await authService.signInWithGoogle(redirectTo);
-
-      if (error) {
-        devError('[Auth] Google OAuth error:', error.message);
+      if (!credentials.idToken) {
         setIsLoading(false);
-        return { success: false, error: error.message };
+        return { success: false, error: 'Failed to retrieve Google ID token' };
       }
 
-      if (!data?.url) {
-        devError('[Auth] No OAuth URL returned');
+      devLog('[Auth] Authenticating Google ID Token with backend...');
+      const response = await authService.googleLogin(credentials.idToken);
+
+      if (!response.success || !response.data) {
         setIsLoading(false);
-        return { success: false, error: 'Failed to initiate Google sign-in' };
+        return { success: false, error: response.message || 'Google authentication failed' };
       }
 
-      devLog('[Auth] Opening OAuth URL in browser...');
-      
-      // Open OAuth URL in browser
-      const result = await WebBrowser.openAuthSessionAsync(
-        data.url,
-        redirectTo
-      );
+      const { accessToken, refreshToken, user: backendUser } = response.data;
 
-      devLog('[Auth] Browser session result:', result.type);
-
-      if (result.type === 'success') {
-        const { url } = result;
-        devLog('[Auth] OAuth success URL:', url);
-
-        // Extract parameters from query string (?code=...) or URL fragment (#access_token=...)
-        const queryString = url.includes('?') ? url.split('?')[1].split('#')[0] : '';
-        const fragmentString = url.includes('#') ? url.split('#')[1] : '';
-        const params = new URLSearchParams(queryString || fragmentString);
-
-        const code = params.get('code');
-        const access_token = params.get('access_token');
-        const refresh_token = params.get('refresh_token');
-
-        let sessionUser: any = null;
-
-        if (code) {
-          devLog('[Auth] Exchanging PKCE code for session...');
-          const { data: exchangeData, error: exchangeError } = await supabase.auth.exchangeCodeForSession(code);
-          if (exchangeError) {
-            devError('[Auth] Failed to exchange PKCE code:', exchangeError.message);
-            setIsLoading(false);
-            return { success: false, error: exchangeError.message };
-          }
-          sessionUser = exchangeData.user;
-        } else if (access_token && refresh_token) {
-          devLog('[Auth] Setting session from implicit tokens...');
-          const { data: sessionData, error: sessionError } = await authService.setSession(
-            access_token,
-            refresh_token
-          );
-
-          if (sessionError) {
-            devError('[Auth] Failed to set session:', sessionError.message);
-            setIsLoading(false);
-            return { success: false, error: sessionError.message };
-          }
-          sessionUser = sessionData.user || sessionData.session?.user || null;
-        } else {
-          devError('[Auth] Neither PKCE code nor tokens found in callback URL:', url);
-          setIsLoading(false);
-          return { success: false, error: 'Invalid authentication callback' };
-        }
-
-        devLog('[Auth] Google OAuth successful');
-        setIsLoading(false);
-        if (sessionUser?.id) {
-          const { data: profile } = await authService.getProfile(sessionUser.id);
-          return { success: true, profile } as any;
-        }
-        return { success: true };
-      } else if (result.type === 'cancel') {
-        devLog('[Auth] User cancelled OAuth');
-        setIsLoading(false);
-        return { success: false, error: 'Sign-in cancelled' };
+      if (accessToken && refreshToken) {
+        await tokenStorage.saveTokens(accessToken, refreshToken);
       }
 
+      const dummySupabaseUser: SupabaseUser = {
+        id: backendUser.id,
+        email: backendUser.email,
+        app_metadata: {},
+        user_metadata: {
+          full_name: backendUser.name,
+          avatar_url: backendUser.profileImage,
+        },
+        aud: 'authenticated',
+        created_at: new Date().toISOString(),
+      };
+
+      const customSession: Session = {
+        access_token: accessToken || 'session_token',
+        refresh_token: refreshToken || 'refresh_token',
+        expires_in: 3600,
+        token_type: 'bearer',
+        user: dummySupabaseUser,
+      };
+
+      setSession(customSession);
+      setIsAuthenticatedLocally(true);
+
+      const { data: profile } = await authService.getProfile(backendUser.id);
+      const domainUser = buildUser(profile, dummySupabaseUser);
+      setUser(domainUser);
+
+      registerForPushNotifications(backendUser.id).catch(() => {});
       setIsLoading(false);
-      return { success: false, error: 'Authentication failed' };
+
+      return { success: true, profile } as any;
     } catch (error: any) {
       devError('[Auth] Google OAuth exception:', error.message);
       setIsLoading(false);

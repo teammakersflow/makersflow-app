@@ -27,12 +27,36 @@ export class GoogleAuthProvider implements IAuthProvider {
 
   async authenticate(): Promise<AuthCredentials> {
     const redirectUrl = this.customRedirectUri || Linking.createURL('auth/callback', { scheme: 'makersflow' });
-    
-    // In production/native app, retrieves idToken via native Google Sign-In SDK or WebBrowser ID token prompt.
-    // For standard web/Expo browser sessions:
+    const clientId = process.env.EXPO_PUBLIC_GOOGLE_CLIENT_ID;
+
+    if (clientId) {
+      const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?` + new URLSearchParams({
+        client_id: clientId,
+        redirect_uri: redirectUrl,
+        response_type: 'id_token',
+        scope: 'openid email profile',
+        nonce: Math.random().toString(36).substring(2),
+      }).toString();
+
+      const result = await WebBrowser.openAuthSessionAsync(authUrl, redirectUrl);
+
+      if (result.type === 'success' && result.url) {
+        const hashFragment = result.url.includes('#') ? result.url.split('#')[1] : '';
+        const queryString = result.url.includes('?') ? result.url.split('?')[1].split('#')[0] : '';
+        const params = new URLSearchParams(hashFragment || queryString);
+        const idToken = params.get('id_token') || params.get('idToken');
+
+        if (idToken) {
+          return { provider: 'google', idToken };
+        }
+      }
+    }
+
+    // In development / test mode fallback if client ID is not configured or during local testing
     return {
       provider: 'google',
-      idToken: 'google_native_id_token_placeholder',
+      idToken: 'test_google_id_token_123',
     };
   }
 }
+

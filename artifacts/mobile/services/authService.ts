@@ -1,62 +1,107 @@
 import { supabase } from '@/lib/supabase';
+import { customAuthService, AuthLoginResponse, AuthUserResponse } from '@/lib/auth/customAuthService';
+import { tokenStorage } from '@/lib/auth/tokenStorage';
 import type { Profile } from '@/types/auth';
 
 /**
- * Sign in with email and password
+ * Sign in with Google idToken (POST /auth/google)
  */
-export async function signInWithPassword(email: string, password: string) {
-  return await supabase.auth.signInWithPassword({
-    email,
-    password,
-  });
+export async function googleLogin(idToken: string): Promise<AuthLoginResponse> {
+  return await customAuthService.loginWithGoogle(idToken);
 }
 
 /**
- * Sign up a new user
+ * Legacy Google Sign-In helper delegating to googleLogin
  */
-export async function signUp(
-  email: string,
-  password: string,
-  metadata?: { name?: string; grade?: string; school?: string; phone?: string; age?: number },
-  redirectTo?: string
-) {
-  return await supabase.auth.signUp({
-    email,
-    password,
-    options: {
-      data: metadata,
-      emailRedirectTo: redirectTo,
-    },
-  });
+export async function signInWithGoogle(idToken: string) {
+  return await googleLogin(idToken);
 }
 
 /**
- * Sign out the current user
+ * Sign out the current user (POST /auth/logout and clear tokens)
  */
 export async function signOut() {
-  return await supabase.auth.signOut();
-}
-
-/** Signs out this device only — does NOT revoke the refresh token server-side.
- *  Used when biometric login is enabled so the stored token stays valid. */
-export async function signOutLocal() {
-  return await supabase.auth.signOut({ scope: 'local' });
-}
-
-/** Exchanges a stored refresh token for a fresh session (biometric unlock). */
-export async function refreshSessionWithToken(refreshToken: string) {
-  return await supabase.auth.refreshSession({ refresh_token: refreshToken });
+  try {
+    await customAuthService.logout();
+  } finally {
+    await tokenStorage.clearTokens();
+  }
+  return { error: null };
 }
 
 /**
- * Get the current session
+ * Local sign out clearing secure tokens
+ */
+export async function signOutLocal() {
+  await tokenStorage.clearTokens();
+  return { error: null };
+}
+
+/**
+ * Refresh session tokens via POST /auth/refresh
+ */
+export async function refreshSessionWithToken(refreshToken: string) {
+  try {
+    const res = await customAuthService.refreshTokens(refreshToken);
+    if (res.success && res.data) {
+      await tokenStorage.saveTokens(res.data.accessToken, res.data.refreshToken);
+      return { data: res.data, error: null };
+    }
+    return { data: null, error: new Error(res.message || 'Token refresh failed') };
+  } catch (err: any) {
+    return { data: null, error: err };
+  }
+}
+
+/**
+ * Fetch current authenticated user via GET /auth/me
+ */
+export async function getCurrentUser(): Promise<{ data: AuthUserResponse | null; error: Error | null }> {
+  try {
+    const res = await customAuthService.getCurrentUser();
+    if (res.success && res.data) {
+      return { data: res.data, error: null };
+    }
+    return { data: null, error: new Error('User not found') };
+  } catch (err: any) {
+    return { data: null, error: err };
+  }
+}
+
+/**
+ * Legacy session check using tokenStorage and GET /auth/me
  */
 export async function getSession() {
-  return await supabase.auth.getSession();
+  const token = await tokenStorage.getAccessToken();
+  const refreshToken = await tokenStorage.getRefreshToken();
+  if (!token) return { data: { session: null } };
+  const { data: user, error } = await getCurrentUser();
+  if (error || !user) return { data: { session: null } };
+  return {
+    data: {
+      session: {
+        access_token: token,
+        refresh_token: refreshToken || '',
+        expires_in: 3600,
+        token_type: 'bearer' as const,
+        user: {
+          id: user.id,
+          email: user.email,
+          app_metadata: {},
+          user_metadata: {
+            full_name: user.name,
+            avatar_url: user.profileImage,
+          },
+          aud: 'authenticated',
+          created_at: new Date().toISOString(),
+        },
+      },
+    },
+  };
 }
 
 /**
- * Get user profile from database
+ * Get user profile from database (Supabase DB)
  */
 export async function getProfile(userId: string) {
   return await supabase
@@ -67,7 +112,7 @@ export async function getProfile(userId: string) {
 }
 
 /**
- * Create or update user profile in database
+ * Create or update user profile in database (Supabase DB)
  */
 export async function createProfile(profileData: {
   id: string;
@@ -85,7 +130,7 @@ export async function createProfile(profileData: {
 }
 
 /**
- * Update user profile
+ * Update user profile in database (Supabase DB)
  */
 export async function updateProfile(
   userId: string,
@@ -108,71 +153,76 @@ export async function updateProfile(
 }
 
 /**
- * Sign in with Google OAuth
+ * Legacy password login fallback (pending backend email auth implementation)
  */
-export async function signInWithGoogle(redirectTo: string) {
-  return await supabase.auth.signInWithOAuth({
-    provider: 'google',
+export async function signInWithPassword(email: string, _password: string) {
+  return await supabase.auth.signInWithPassword({ email, password: _password });
+}
+
+/**
+ * Legacy signup fallback (pending backend signup implementation)
+ */
+export async function signUp(
+  email: string,
+  password: string,
+  metadata?: { name?: string; grade?: string; school?: string; phone?: string; age?: number },
+  redirectTo?: string
+) {
+  return await supabase.auth.signUp({
+    email,
+    password,
     options: {
-      redirectTo: redirectTo,
-      skipBrowserRedirect: true,
+      data: metadata,
+      emailRedirectTo: redirectTo,
     },
   });
 }
 
 /**
- * Set session manually (used after OAuth)
+ * Set session manually
  */
 export async function setSession(accessToken: string, refreshToken: string) {
-  return await supabase.auth.setSession({
-    access_token: accessToken,
-    refresh_token: refreshToken,
-  });
+  await tokenStorage.saveTokens(accessToken, refreshToken);
+  return { data: { user: null }, error: null };
 }
 
 /**
- * Subscribe to auth state changes
+ * Auth state change listener (stub for legacy compatibility)
  */
 export function onAuthStateChange(
-  callback: (event: string, session: any) => void
+  _callback: (event: string, session: any) => void
 ) {
-  return supabase.auth.onAuthStateChange(callback);
+  return {
+    data: {
+      subscription: {
+        unsubscribe: () => {},
+      },
+    },
+  };
 }
 
 /**
- * Reset password via email
+ * Password reset fallback
  */
 export async function resetPasswordForEmail(email: string, redirectTo: string) {
-  return await supabase.auth.resetPasswordForEmail(email, {
-    redirectTo,
-  });
+  return await supabase.auth.resetPasswordForEmail(email, { redirectTo });
 }
 
 /**
- * Update the user's password
+ * Update password fallback
  */
 export async function updatePassword(password: string) {
-  return await supabase.auth.updateUser({
-    password: password,
-  });
+  return await supabase.auth.updateUser({ password });
 }
 
 /**
- * Send OTP to phone number
+ * OTP fallback
  */
 export async function sendOtp(phone: string) {
-  return await supabase.auth.signInWithOtp({
-    phone,
-  });
+  return await supabase.auth.signInWithOtp({ phone });
 }
 
-/**
- * Verify OTP for phone number
- */
 export async function verifyOtp(phone: string, token: string) {
-  return await supabase.auth.verifyOtp({
-    phone,
-    token,
-    type: 'sms',
-  });
+  return await supabase.auth.verifyOtp({ phone, token, type: 'sms' });
 }
+
