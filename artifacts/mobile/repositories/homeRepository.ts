@@ -154,8 +154,8 @@ async function fetchProducts(): Promise<any[]> {
 
   const { data, error } = await supabase
     .from('products')
-    .select('id, title, description, price, original_price, category, subcategory, thumbnail_url, images, videos, in_stock')
-    .or('status.eq.available,status.eq.active')
+    .select('id, title, description, price, original_price, category, subcategory, thumbnail_url, images, videos, in_stock, status')
+    .or('status.eq.available,status.eq.active,status.eq.sold_out,status.eq.out_of_stock')
     .neq('category', 'digital')
     .order('created_at', { ascending: false })
     .limit(8);
@@ -202,7 +202,7 @@ async function fetchProducts(): Promise<any[]> {
       description: row.description || 'No description available.',
       rating,
       reviews,
-      inStock: row.in_stock === undefined ? true : Boolean(row.in_stock),
+      inStock: (row.in_stock === false || row.status === 'sold_out' || row.status === 'out_of_stock') ? false : Boolean(row.in_stock ?? true),
       features: [],
     };
   });

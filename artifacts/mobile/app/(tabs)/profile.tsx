@@ -70,7 +70,7 @@ export default function ProfileScreen() {
     try {
       const { data, error } = await supabase
         .from('products')
-        .select('id, title, description, price, original_price, category, subcategory, thumbnail_url, in_stock')
+        .select('id, title, description, price, original_price, category, subcategory, thumbnail_url, in_stock, status')
         .in('id', wishlistProductIds.map(Number));
       if (!error && data) {
         const kitFallbacks = [
@@ -89,7 +89,7 @@ export default function ProfileScreen() {
           description: row.description || "No description available.",
           rating: 0,
           reviews: 0,
-          inStock: row.in_stock === undefined ? true : Boolean(row.in_stock),
+          inStock: (row.in_stock === false || row.status === 'sold_out' || row.status === 'out_of_stock') ? false : Boolean(row.in_stock ?? true),
           features: [],
         }));
         setWishlistProducts(mapped);

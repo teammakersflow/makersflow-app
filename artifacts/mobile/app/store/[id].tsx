@@ -146,7 +146,7 @@ function mapSupabaseProduct(row: any): Product {
     description: row.description || "No description available.",
     rating: Number(row.rating) || 0,
     reviews: Number(row.total_reviews) || 0,
-    inStock: row.in_stock === undefined ? true : Boolean(row.in_stock),
+    inStock: (row.in_stock === false || row.status === 'sold_out' || row.status === 'out_of_stock') ? false : Boolean(row.in_stock ?? true),
     badge: row.badge || undefined,
     features: Array.isArray(row.features) ? row.features : [],
   };
@@ -707,7 +707,7 @@ export default function ProductDetailScreen() {
           </Pressable>
 
           <Pressable
-            style={{ flex: 1.2, height: 48 }}
+            style={{ flex: 1.2, height: 48, opacity: product.inStock ? 1 : 0.5 }}
             onPress={() => {
               requireAuth(() => {
                 if (!product?.id) return;

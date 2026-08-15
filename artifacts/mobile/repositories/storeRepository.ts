@@ -117,7 +117,7 @@ function mapRow(row: any, index: number): Product {
     description: row.description || 'No description available.',
     rating: Number(row.rating) || 0,
     reviews: Number(row.total_reviews) || 0,
-    inStock: row.in_stock === undefined ? true : Boolean(row.in_stock),
+    inStock: (row.in_stock === false || row.status === 'sold_out' || row.status === 'out_of_stock') ? false : Boolean(row.in_stock ?? true),
     weight_kg: row.weight_kg ? Number(row.weight_kg) : undefined,
     badge: row.badge || undefined,
     features: Array.isArray(row.features) ? row.features : [],
@@ -126,12 +126,14 @@ function mapRow(row: any, index: number): Product {
 
 // ── Remote fetcher ───────────────────────────────────────────────────────────
 async function fetchProducts(): Promise<Product[]> {
+  // TECH DEBT NOTE: Allowlist filter for public product statuses.
+  // Consider switching to denylist (.neq status draft/archived/inactive) in future refactors.
   const { data, error } = await supabase
     .from('products')
     .select(
       'id, title, slug, description, price, original_price, category, subcategory, thumbnail_url, images, videos, in_stock, status, is_course, course_id, weight_kg'
     )
-    .or('status.eq.available,status.eq.active');
+    .or('status.eq.available,status.eq.active,status.eq.sold_out,status.eq.out_of_stock');
 
   if (error) throw error;
   return (data ?? []).map((row, idx) => mapRow(row, idx));

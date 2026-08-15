@@ -107,7 +107,7 @@ export default function SearchScreen() {
           const { data: prodData } = await supabase
             .from('products')
             .select('id, title, category, subcategory, price, original_price, thumbnail_url, in_stock, badge, status')
-            .or('status.eq.available,status.eq.active');
+            .or('status.eq.available,status.eq.active,status.eq.sold_out,status.eq.out_of_stock');
 
           if (prodData) {
             const mappedProds = prodData.map((row: any) => {
@@ -124,7 +124,7 @@ export default function SearchScreen() {
                 thumbnail: row.thumbnail_url
                   ? { uri: row.thumbnail_url }
                   : (PRODUCT_FALLBACKS[category] || PRODUCT_FALLBACKS.physical)[Number(row.id) % 3],
-                inStock: row.in_stock === undefined ? true : Boolean(row.in_stock),
+                inStock: (row.in_stock === false || row.status === 'sold_out' || row.status === 'out_of_stock') ? false : Boolean(row.in_stock ?? true),
                 badge: row.badge,
                 rating: Number(row.rating) || 0,
                 reviews: Number(row.total_reviews) || 0,
@@ -160,7 +160,7 @@ export default function SearchScreen() {
       const { data: prodData } = await supabase
         .from("products")
         .select("id, title, category, subcategory, price, original_price, thumbnail_url, in_stock, badge, status")
-        .or("status.eq.available,status.eq.active");
+        .or("status.eq.available,status.eq.active,status.eq.sold_out,status.eq.out_of_stock");
       if (prodData) {
         const mappedProds = prodData.map((row: any) => {
           const isDigital = row.category?.toLowerCase() === "digital" || row.subcategory?.toLowerCase() === "notes";
@@ -170,7 +170,7 @@ export default function SearchScreen() {
             subcategory: row.subcategory || (isDigital ? "Notes" : "Physical Kits"),
             price: Number(row.price) || 0, originalPrice: Number(row.original_price) || Number(row.price) || 0,
             thumbnail: row.thumbnail_url ? { uri: row.thumbnail_url } : null,
-            inStock: row.in_stock === undefined ? true : Boolean(row.in_stock),
+            inStock: (row.in_stock === false || row.status === 'sold_out' || row.status === 'out_of_stock') ? false : Boolean(row.in_stock ?? true),
             badge: row.badge, rating: 0, reviews: 0,
           };
         });
