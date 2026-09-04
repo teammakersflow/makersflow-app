@@ -25,7 +25,6 @@
  * TTL expiry returns null; next online load overwrites.
  */
 
-import { supabase } from '@/lib/supabase';
 import { STORAGE_KEYS } from '@/constants/storageKeys';
 import { CACHE_POLICY } from '@/constants/cachePolicy';
 import { cacheManager, networkResult, cacheResult, RepositoryResult } from '@/services/cacheManager';
@@ -34,6 +33,7 @@ import { firstThumbnailUrl, parseThumbnailUrls } from '@/lib/thumbnailUtils';
 import { fetchAllCourses } from '@/services/courseDataProvider';
 import { fetchEnrolledCourses } from '@/services/enrollmentService';
 import { fetchCourseProgress } from '@/lib/progressStorage';
+import { fetchCourseRatingsSummary } from '@/services/reviewService';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 export interface CourseCatalogItem {
@@ -80,8 +80,8 @@ export const EMPTY_COURSES_DATA: CoursesData = {
 async function fetchCatalog(): Promise<CourseCatalogItem[]> {
   let reviewStats: Record<string, { ratingSum: number; count: number }> = {};
   try {
-    const { data, error } = await supabase.from('reviews').select('course_id, rating');
-    if (!error && data) {
+    const data = await fetchCourseRatingsSummary();
+    if (data && data.length > 0) {
       data.forEach((rev: any) => {
         const id = String(rev.course_id);
         if (!reviewStats[id]) reviewStats[id] = { ratingSum: 0, count: 0 };

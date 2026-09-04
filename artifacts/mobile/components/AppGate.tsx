@@ -14,7 +14,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { router } from "expo-router";
 import * as SecureStore from "expo-secure-store";
 import * as Application from "expo-application";
-import { useAuth } from "@/context/AuthContextSupabase";
+import { useAuth } from "@/context/AuthContext";
 import { registerForPushNotifications } from "@/lib/pushNotifications";
 
 const BIOMETRIC_KEY = "makersflow_biometric_enabled";

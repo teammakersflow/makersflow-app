@@ -25,7 +25,7 @@ import { ResumeModal } from "@/components/ResumeModal";
 import { LessonCompleteModal } from "@/components/LessonCompleteModal";
 import { LearningTabs } from "@/components/LearningTabs";
 import { useColors } from "@/hooks/useColors";
-import { useAuth } from "@/context/AuthContextSupabase";
+import { useAuth } from "@/context/AuthContext";
 import { useFavorites } from "@/context/FavoritesContext";
 import { useProgress } from "@/context/ProgressContext";
 import { getCourseById, getCourseModules } from "@/services/courseDataProvider";
@@ -35,7 +35,7 @@ import { getEnrollment, isExpired, completeCourse } from "@/services/enrollmentS
 import { onSessionExpired } from "@/lib/sessionEvents";
 import { ActivityIndicator } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { fetchMyReview, upsertReview } from '@/services/reviewService';
+import { fetchMyReview, upsertReview } from "@/services/reviewService";
 
 export default function LearnScreen() {
   const colors = useColors();

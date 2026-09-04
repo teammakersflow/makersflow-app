@@ -13,8 +13,8 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useColors } from "@/hooks/useColors";
-import { useAuth } from "@/context/AuthContextSupabase";
-import { supabase } from "@/lib/supabase";
+import { useAuth } from "@/context/AuthContext";
+import { orderService } from "@/services/orderService";
 
 export default function TransactionsScreen() {
   const colors = useColors();
@@ -32,18 +32,7 @@ export default function TransactionsScreen() {
     }
     if (!isRefreshing && !hasLoadedOnce.current) setIsLoading(true);
     try {
-      // Fetch completed, paid or refunded orders
-      const { data, error } = await supabase
-        .from("orders")
-        .select("*")
-        .eq("user_id", user.id)
-        .order("created_at", { ascending: false });
-
-
-      if (error) {
-        console.error("[Transactions] Error fetching transactions:", error);
-        return;
-      }
+      const data = await orderService.getMyOrders();
 
       if (data) {
         const mapped = data.map((order: any) => {

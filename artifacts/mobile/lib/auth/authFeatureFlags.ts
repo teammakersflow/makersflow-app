@@ -2,12 +2,12 @@
  * lib/auth/authFeatureFlags.ts
  *
  * Feature flags controlling authentication migration rollout.
+ * Default is true as Mobile authentication is now unified on Custom Backend Auth.
  */
 
 export const AUTH_FEATURE_FLAGS = {
   /**
-   * Toggle between legacy Supabase Auth (false) and Custom Backend Auth (true).
-   * Can be driven via EXPO_PUBLIC_USE_CUSTOM_AUTH environment variable.
+   * Custom Backend Auth is active.
    */
-  USE_CUSTOM_BACKEND_AUTH: process.env.EXPO_PUBLIC_USE_CUSTOM_AUTH === 'true',
+  USE_CUSTOM_BACKEND_AUTH: true,
 };

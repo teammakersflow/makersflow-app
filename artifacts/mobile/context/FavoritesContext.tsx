@@ -1,11 +1,11 @@
 import React, { createContext, useContext, useEffect, useRef, useState } from "react";
-import { useAuth } from "./AuthContextSupabase";
+import { useAuth } from "./AuthContext";
 import {
   FavoriteCourse,
   WatchLaterLesson,
   FavoritesStorage,
 } from "@/lib/favoritesStorage";
-import { supabase } from "@/lib/supabase";
+import { wishlistService } from "@/services/wishlistService";
 
 interface FavoritesContextType {
   favoriteCourses: FavoriteCourse[];
@@ -57,7 +57,7 @@ export function FavoritesProvider({ children }: { children: React.ReactNode }) {
   const [wishlistProductIds, setWishlistProductIds] = useState<string[]>([]);
 
   // The reliable user ID: prefer profile user.id, fall back to session user id
-  const userId = user?.id ?? session?.user?.id ?? null;
+  const userId = user?.id ?? (session as any)?.user?.id ?? null;
 
   // Track previous userId to detect logout
   const prevUserIdRef = useRef<string | null>(null);
@@ -88,14 +88,9 @@ export function FavoritesProvider({ children }: { children: React.ReactNode }) {
       setWatchLaterLessons(lessons);
       setDownloadedLessons(downloads);
 
-      // Load product wishlist from Supabase
-      const { data: wishlistData, error: wishlistError } = await supabase
-        .from('wishlist')
-        .select('product_id')
-        .eq('user_id', uid);
-      if (!wishlistError && wishlistData) {
-        setWishlistProductIds(wishlistData.map((w: any) => String(w.product_id)));
-      }
+      // Load product wishlist via canonical backend service
+      const wishlistIds = await wishlistService.getWishlist();
+      setWishlistProductIds(wishlistIds);
     } catch (error) {
       console.error("Failed to load favorites:", error);
     }
@@ -275,30 +270,26 @@ export function FavoritesProvider({ children }: { children: React.ReactNode }) {
   async function toggleWishlistProduct(productId: string): Promise<void> {
     if (!userId) return;
     const isWishlisted = isProductInWishlist(productId);
+    const prevIds = wishlistProductIds;
     
-    // Update state immediately for instant feedback
+    // Optimistic UI update with safe rollback on failure
     if (isWishlisted) {
-      setWishlistProductIds(wishlistProductIds.filter(id => id !== String(productId)));
+      setWishlistProductIds((prev) => prev.filter((id) => id !== String(productId)));
       try {
-        await supabase
-          .from('wishlist')
-          .delete()
-          .eq('user_id', userId)
-          .eq('product_id', Number(productId));
+        await wishlistService.removeFromWishlist(productId);
       } catch (err) {
         console.error("Failed to delete from wishlist:", err);
+        setWishlistProductIds(prevIds);
+        throw err;
       }
     } else {
-      setWishlistProductIds([...wishlistProductIds, String(productId)]);
+      setWishlistProductIds((prev) => [...prev, String(productId)]);
       try {
-        await supabase
-          .from('wishlist')
-          .insert({
-            user_id: userId,
-            product_id: Number(productId)
-          });
+        await wishlistService.addToWishlist(productId);
       } catch (err) {
         console.error("Failed to insert into wishlist:", err);
+        setWishlistProductIds(prevIds);
+        throw err;
       }
     }
   }

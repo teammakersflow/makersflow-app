@@ -26,10 +26,11 @@ import { useColors } from "@/hooks/useColors";
 import { supabase } from "@/lib/supabase";
 import { DetailSkeleton } from "@/components/SkeletonLoader";
 import { cacheManager } from "@/services/cacheManager";
+import { productService } from "@/services/productService";
 import { StarRating } from "@/components/StarRating";
 import { ImageGallery } from "@/components/ImageGallery";
 import { parseThumbnailUrls } from "@/lib/thumbnailUtils";
-import { useAuth } from "@/context/AuthContextSupabase";
+import { useAuth } from "@/context/AuthContext";
 import {
   fetchProductReviews,
   fetchMyProductReview,
@@ -214,7 +215,16 @@ export default function ProductDetailScreen() {
   const handleToggleWishlist = async () => {
     requireAuth(async () => {
       await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-      await toggleWishlistProduct(String(id));
+      try {
+        await toggleWishlistProduct(String(id));
+      } catch (err: any) {
+        if (Platform.OS === 'android') {
+          const { ToastAndroid } = require('react-native');
+          ToastAndroid.show('Could not update wishlist', ToastAndroid.SHORT);
+        } else {
+          Alert.alert('Wishlist', 'Could not update wishlist. Please try again.');
+        }
+      }
     });
   };
 
@@ -249,13 +259,9 @@ export default function ProductDetailScreen() {
     const CACHE_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days
 
     try {
-      const { data, error } = await supabase
-        .from('products')
-        .select('*')
-        .eq('id', Number(id))
-        .maybeSingle();
+      const data = await productService.getProductById(id);
 
-      if (error || !data) {
+      if (!data) {
         console.warn('[ProductDetail] Live product query failed or missing, checking offline cache...');
         const cached = await cacheManager.read<any>(cacheKey, CACHE_TTL);
         if (cached && !cancelledRef.current) {
@@ -269,7 +275,7 @@ export default function ProductDetailScreen() {
         return;
       }
 
-      const mapped = mapSupabaseProduct(data);
+      const mapped = data;
       if (!cancelledRef.current) {
         await cacheManager.write(cacheKey, mapped);
         setIsOfflineCached(false);

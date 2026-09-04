@@ -1,5 +1,5 @@
 import * as FileSystem from "expo-file-system/legacy";
-import { supabase } from "@/lib/supabase";
+import { apiClient } from "@/lib/auth/apiClient";
 
 const MAX_AVATAR_BYTES = 5 * 1024 * 1024; // 5MB
 const ALLOWED_MIME = ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"];
@@ -55,28 +55,57 @@ export async function validateImageFile(
 }
 
 /**
- * Uploads an avatar to Supabase Storage using ArrayBuffer (not Blob).
- * RN Blob can silently upload 0 bytes; ArrayBuffer is reliable.
+ * Uploads an avatar image to NestJS Backend Storage (/storage/upload-url).
+ * Uses ArrayBuffer for reliable binary transfer to presigned S3 PUT URL.
  */
 export async function uploadAvatarFile(
-  userId: string,
-  uri: string
+  uriOrUserId: string,
+  maybeUri?: string
 ): Promise<{ success: boolean; publicUrl?: string; error?: string }> {
+  const uri = maybeUri || uriOrUserId;
   try {
     const response = await fetch(uri);
     const arrayBuffer = await response.arrayBuffer();
     if (!arrayBuffer || arrayBuffer.byteLength === 0)
       return { success: false, error: "Could not read the selected image." };
 
-    const filename = `${userId}_avatar.jpg`;
-    const { error } = await supabase.storage.from("avatars").upload(filename, arrayBuffer, {
-      contentType: "image/jpeg",
-      upsert: true,
-    });
-    if (error) return { success: false, error: error.message };
+    if (arrayBuffer.byteLength > MAX_AVATAR_BYTES) {
+      return { success: false, error: "Image exceeds the maximum allowed size of 5MB." };
+    }
 
-    const { data: { publicUrl } } = supabase.storage.from("avatars").getPublicUrl(filename);
-    return { success: true, publicUrl: `${publicUrl}?t=${Date.now()}` };
+    const ext = uri.split("?")[0].split("#")[0].split(".").pop()?.toLowerCase() ?? "jpg";
+    const contentType = ext === "png" ? "image/png" : ext === "webp" ? "image/webp" : "image/jpeg";
+    const fileName = `avatar.${ext === "png" || ext === "webp" ? ext : "jpg"}`;
+
+    // 1. Request presigned upload URL from backend storage API
+    const presignedData = await apiClient.post<{
+      uploadUrl: string;
+      key: string;
+      publicUrl: string;
+    }>('/storage/upload-url', {
+      fileName,
+      contentType,
+      folder: 'avatars',
+    });
+
+    if (!presignedData?.uploadUrl || !presignedData?.publicUrl) {
+      return { success: false, error: "Failed to get upload authorization." };
+    }
+
+    // 2. Upload file binary directly to S3 via presigned PUT URL
+    const uploadRes = await fetch(presignedData.uploadUrl, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': contentType,
+      },
+      body: arrayBuffer,
+    });
+
+    if (!uploadRes.ok) {
+      return { success: false, error: `Upload failed with status ${uploadRes.status}.` };
+    }
+
+    return { success: true, publicUrl: presignedData.publicUrl };
   } catch (e: any) {
     return { success: false, error: e?.message || "Failed to upload the image. Please try again." };
   }

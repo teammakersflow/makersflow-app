@@ -1,4 +1,4 @@
-import { supabase } from "@/lib/supabase";
+import { apiClient } from "@/lib/auth/apiClient";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -22,8 +22,8 @@ export type PaymentVerifyParams = {
   razorpay_order_id: string;
   razorpay_payment_id: string;
   razorpay_signature: string;
-  amount: number;
-  user_id: string;
+  amount?: number;
+  user_id?: string;
   coupon_code?: string | null;
   coupon_id?: string | null;
   discount_amount?: number;
@@ -31,66 +31,61 @@ export type PaymentVerifyParams = {
 };
 
 // ─── Create Razorpay Order ────────────────────────────────────────────────────
-// Calls the same Supabase edge function used by the web app.
+// Calls backend POST /payments/create-order with JWT bearer authentication.
+// Student identity is derived exclusively from JWT on the backend.
 
 export async function createRazorpayOrder(
-  items: RazorpayCartItem[],
-  totalAmount: number,
-  userId: string,
-  shippingAddress: any,
-  promoCode?: string | null,
-  discountAmount?: number
+  _items?: RazorpayCartItem[],
+  totalAmount = 0,
+  _userId?: string,
+  _shippingAddress?: any,
+  _promoCode?: string | null,
+  _discountAmount?: number
 ): Promise<RazorpayOrderResult> {
-  const { data, error } = await supabase.functions.invoke("create-razorpay-order", {
-    body: {
-      items: items.map((i) => ({
-        id: i.id,
-        qty: i.qty,
-        is_course: i.is_course ?? false,
-        price: i.price,
-        title: i.title || "Product Item",
-      })),
-      total_amount: totalAmount,
-      user_id: userId,
-      shipping_address: shippingAddress,
-      promo_code: promoCode || null,
-      discount_amount: discountAmount || 0,
-    },
-  });
+  try {
+    const res = await apiClient.post<any>("/payments/create-order", {
+      amount: totalAmount,
+      currency: "INR",
+    });
 
-  if (error) {
-    throw new Error(`Could not create payment order: ${error.message}`);
-  }
-  if (!data?.razorpayOrderId) {
-    throw new Error("Invalid response from payment server");
-  }
+    const data = res?.data || res;
 
-  return {
-    id: data.razorpayOrderId,
-    amount: data.amount,
-    currency: data.currency,
-    key_id: data.keyId,
-  };
+    if (!data?.razorpay_order_id && !data?.id) {
+      throw new Error("Invalid response from payment server");
+    }
+
+    return {
+      id: data.razorpay_order_id || data.id,
+      amount: data.amount,
+      currency: data.currency || "INR",
+      key_id: data.key_id,
+    };
+  } catch (error: any) {
+    console.error("[RazorpayService] createRazorpayOrder error:", error);
+    throw new Error(error?.message || "Could not create payment order");
+  }
 }
 
 // ─── Verify Payment Signature ─────────────────────────────────────────────────
-// Calls the verify-razorpay-payment edge function to validate the signature.
+// Calls backend POST /payments/verify to cryptographically validate the HMAC signature.
+// Student identity is derived exclusively from JWT on the backend.
 
 export async function verifyRazorpayPayment(
   params: PaymentVerifyParams,
 ): Promise<{ success: boolean; payment_id?: string }> {
-  const { data, error } = await supabase.functions.invoke("verify-razorpay-payment", {
-    body: {
-      orderId: params.razorpay_order_id,
-      paymentId: params.razorpay_payment_id,
-      signature: params.razorpay_signature,
-    },
-  });
+  try {
+    const res = await apiClient.post<any>("/payments/verify", {
+      razorpay_order_id: params.razorpay_order_id,
+      razorpay_payment_id: params.razorpay_payment_id,
+      razorpay_signature: params.razorpay_signature,
+    });
 
-  if (error) {
-    throw new Error(`Payment verification failed: ${error.message}`);
+    const data = res?.data || res;
+    const verified = Boolean(data?.success ?? true);
+
+    return { success: verified, payment_id: params.razorpay_payment_id };
+  } catch (error: any) {
+    console.error("[RazorpayService] verifyRazorpayPayment error:", error);
+    throw new Error(error?.message || "Payment verification failed");
   }
-
-  const verified = data?.success === true;
-  return { success: verified, payment_id: params.razorpay_payment_id };
 }

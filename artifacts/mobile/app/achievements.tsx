@@ -14,10 +14,12 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { LinearGradient } from "expo-linear-gradient";
-import { useAuth } from "@/context/AuthContextSupabase";
+import { useAuth } from "@/context/AuthContext";
 import { useColors } from "@/hooks/useColors";
 import { supabase } from "@/lib/supabase";
 import { getCourseModules } from "@/services/courseDataProvider";
+import { fetchEnrolledCourses } from "@/services/enrollmentService";
+import { fetchCourseProgress } from "@/lib/progressStorage";
 import { TEXT_STYLES, TYPOGRAPHY } from "@/constants/typography";
 import { AchievementsSkeleton } from "@/components/SkeletonLoader";
 
@@ -120,34 +122,15 @@ export default function AchievementsScreen() {
         }
         if (!hasLoadedOnce.current) setIsLoading(true);
         try {
-          // Get all enrollments with level and instructor_id
-          const { data: enrollments } = await supabase
-            .from("enrollments")
-            .select("course_id, completed_at, enrolled_at, courses(title, level, instructor_id)")
-            .eq("user_id", user.id);
-
-          if (!enrollments) {
-            setIsLoading(false);
-            return;
-          }
-
-          // Get all lesson progress
-          const { data: progressData } = await supabase
-            .from("lesson_progress")
-            .select("course_id, lesson_id, is_completed")
-            .eq("user_id", user.id);
-
-          const progressList = progressData ?? [];
+          const validEnrollments = await fetchEnrolledCourses(user.id);
           const results: CompletedCourse[] = [];
 
-          const validEnrollments = enrollments.filter((enr: any) => enr.courses);
           for (const enr of validEnrollments) {
-            const courseId = String(enr.course_id);
+            const courseId = String(enr.course_id || enr.courses?.id);
             const courseTitle = (enr.courses as any)?.title ?? "Unknown Course";
             const level = (enr.courses as any)?.level;
             const instructor = undefined;
 
-            // If already marked completed in enrollments table
             if (enr.completed_at) {
               results.push({
                 courseId,
@@ -159,23 +142,8 @@ export default function AchievementsScreen() {
               continue;
             }
 
-            // Otherwise check if all lessons are done
-            const modules = await getCourseModules(courseId);
-            const allLessonIds = modules.flatMap((m: any) =>
-              (m.lessons ?? []).map((l: any) => l.id)
-            );
-
-            if (allLessonIds.length === 0) continue;
-
-            const completedIds = progressList
-              .filter((p) => p.is_completed && String(p.course_id) === courseId)
-              .map((p) => String(p.lesson_id));
-
-            const allDone = allLessonIds.every((id: string) =>
-              completedIds.includes(String(id))
-            );
-
-            if (allDone) {
+            const prog = await fetchCourseProgress(user.id, courseId);
+            if (prog.total > 0 && prog.completed >= prog.total) {
               results.push({
                 courseId,
                 courseTitle,

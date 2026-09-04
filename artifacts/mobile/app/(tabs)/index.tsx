@@ -29,7 +29,7 @@ import { SectionHeader } from "@/components/SectionHeader";
 import { WatchlistCard } from "@/components/WatchlistCard";
 import { ProductCard } from "@/components/ProductCard";
 import { HomeSkeleton } from "@/components/SkeletonLoader";
-import { useAuth } from "@/context/AuthContextSupabase";
+import { useAuth } from "@/context/AuthContext";
 import { Product } from "@/data/mockData";
 import { useColors } from "@/hooks/useColors";
 import { useProgress } from "@/context/ProgressContext";

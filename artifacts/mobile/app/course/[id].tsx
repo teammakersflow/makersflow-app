@@ -31,7 +31,7 @@ import { ImageGallery } from "@/components/ImageGallery";
 import { cacheManager } from "@/services/cacheManager";
 import { QUIZZES } from "@/data/mockData";
 import { useColors } from "@/hooks/useColors";
-import { useAuth } from "@/context/AuthContextSupabase";
+import { useAuth } from "@/context/AuthContext";
 import { useCart } from "@/context/CartContext";
 import { useFavorites } from "@/context/FavoritesContext";
 import { supabase } from "@/lib/supabase";
@@ -43,6 +43,7 @@ import { fetchCourseReviews, fetchMyReview, upsertReview } from "@/services/revi
 import { parseThumbnailUrls } from "@/lib/thumbnailUtils";
 import { homeRepository } from "@/repositories/homeRepository";
 import { coursesRepository } from "@/repositories/coursesRepository";
+import { productService } from "@/services/productService";
 
 export default function CourseDetailScreen() {
   const colors = useColors();
@@ -365,11 +366,8 @@ export default function CourseDetailScreen() {
 
       try {
         if (!course.isFree) {
-          const { data: linkedProduct } = await supabase
-            .from("products")
-            .select("id, title, description, price, original_price, category, subcategory, thumbnail_url, in_stock")
-            .eq("course_id", Number(course.id))
-            .maybeSingle();
+          const { products } = await productService.getProducts({ limit: 100 });
+          const linkedProduct = products.find((p) => Number(p.course_id) === Number(course.id));
 
           if (!linkedProduct) {
             // No linked product row — create a virtual product from the course itself
@@ -403,13 +401,13 @@ export default function CourseDetailScreen() {
             category: "digital",
             subcategory: linkedProduct.subcategory || "Courses",
             price: Number(linkedProduct.price) || course.price,
-            originalPrice: Number(linkedProduct.original_price) || Number(linkedProduct.price) || course.price,
-            thumbnail: linkedProduct.thumbnail_url ? { uri: linkedProduct.thumbnail_url } : course.thumbnail,
+            originalPrice: Number(linkedProduct.originalPrice) || Number(linkedProduct.price) || course.price,
+            thumbnail: linkedProduct.thumbnail || course.thumbnail,
             description: linkedProduct.description || course.description,
             rating: 4.8,
             reviews: 0,
-            inStock: true,
-            features: [],
+            inStock: linkedProduct.inStock,
+            features: linkedProduct.features || [],
             is_course: true,
             course_id: String(course.id),
           };

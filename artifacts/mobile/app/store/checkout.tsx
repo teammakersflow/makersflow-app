@@ -22,8 +22,9 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useCart } from "@/context/CartContext";
 import { useColors } from "@/hooks/useColors";
-import { useAuth } from "@/context/AuthContextSupabase";
+import { useAuth } from "@/context/AuthContext";
 import { supabase } from "@/lib/supabase";
+import { productService } from "@/services/productService";
 import * as Print from "expo-print";
 import * as FileSystem from "expo-file-system/legacy";
 import { setInvoicePath } from "@/lib/invoiceStorage";
@@ -34,6 +35,7 @@ import {
   type InvoiceLineItem,
   type InvoiceAddress,
 } from "@/lib/invoiceUtils";
+import { settingsService } from "@/services/settingsService";
 import { RazorpayWebView, type RazorpayPaymentParams } from "@/components/RazorpayWebView";
 interface ShiprocketRate {
   success: boolean;
@@ -46,6 +48,7 @@ import {
   createRazorpayOrder,
   verifyRazorpayPayment,
 } from "@/services/razorpayService";
+import { orderService } from "@/services/orderService";
 
 // ─── Slide-to-Pay Button ─────────────────────────────────────────────────────
 
@@ -206,8 +209,8 @@ export default function CheckoutScreen() {
   const { user } = useAuth();
 
   // ── Contact (digital-only orders) ──
-  const [name, setName] = useState("");
-  const [phone, setPhone] = useState("");
+  const [name, setName] = useState(user?.name ?? "");
+  const [phone, setPhone] = useState(user?.phone ?? "");
 
   // ── Loading ──
   const [loading, setLoading] = useState(false);
@@ -305,18 +308,13 @@ export default function CheckoutScreen() {
 
   // ── Load admin shipping config ──
   useEffect(() => {
-    supabase
-      .from("settings")
-      .select("key, value")
-      .in("key", ["shipping_fee", "shipping_fee_remote", "free_shipping_threshold"])
-      .then(({ data }) => {
-        if (!data) return;
-        const map = Object.fromEntries(data.map((r: any) => [r.key, Number(r.value)]));
-        setShippingConfig({
-          fee: map.shipping_fee ?? 49,
-          remoteFee: map.shipping_fee_remote ?? 149,
-          threshold: map.free_shipping_threshold ?? 999,
-        });
+    settingsService
+      .getShippingSettings()
+      .then((config) => {
+        setShippingConfig(config);
+      })
+      .catch((err) => {
+        console.warn("[Checkout] Failed to load shipping settings from backend:", err);
       });
   }, []);
 
@@ -385,13 +383,34 @@ export default function CheckoutScreen() {
   // ── Load GST rates ──
   useEffect(() => {
     if (items.length === 0) return;
-    supabase
-      .from("products")
-      .select("id, gst_rate")
-      .in("id", items.map((i) => i.product.id))
-      .then(({ data }) => {
-        setGstRates(new Map((data ?? []).map((r: any) => [String(r.id), r.gst_rate ?? 18])));
-      });
+    let isMounted = true;
+    (async () => {
+      const map = new Map<string, number>();
+      const missingIds: string[] = [];
+      for (const item of items) {
+        if (item.product.gst_rate !== undefined && item.product.gst_rate !== null) {
+          map.set(String(item.product.id), Number(item.product.gst_rate));
+        } else {
+          missingIds.push(String(item.product.id));
+        }
+      }
+      if (missingIds.length > 0) {
+        const fetched = await Promise.all(
+          missingIds.map((id) => productService.getProductById(id).catch(() => null))
+        );
+        for (const p of fetched) {
+          if (p) {
+            map.set(String(p.id), p.gst_rate ?? 18);
+          }
+        }
+      }
+      if (isMounted) {
+        setGstRates(map);
+      }
+    })();
+    return () => {
+      isMounted = false;
+    };
   }, [items]);
 
   // ── Cart guard ──
@@ -405,18 +424,11 @@ export default function CheckoutScreen() {
     if (cartChecked && items.length === 0) router.back();
   }, [cartChecked, items.length]);
 
-  // ── Load user profile ──
+  // ── Sync user profile ──
   useEffect(() => {
-    if (!user?.id) return;
-    supabase
-      .from("profiles")
-      .select("full_name")
-      .eq("id", user.id)
-      .maybeSingle()
-      .then(({ data }) => {
-        if (data?.full_name) setName(data.full_name);
-      });
-  }, [user?.id]);
+    if (user?.name && !name) setName(user.name);
+    if (user?.phone && !phone) setPhone(user.phone);
+  }, [user?.name, user?.phone]);
 
   // ── Load addresses ──
   async function loadAddresses(keepSelectedId?: string) {
@@ -635,12 +647,6 @@ export default function CheckoutScreen() {
         throw new Error(orderErr.message ?? "Failed to create Razorpay order.");
       }
 
-      const { data: profile } = await supabase
-        .from("profiles")
-        .select("email")
-        .eq("id", user.id)
-        .maybeSingle();
-
       setPendingAddress(activeAddress);
 
       setRazorpayParams({
@@ -649,7 +655,7 @@ export default function CheckoutScreen() {
         currency: rzpOrder.currency,
         keyId: rzpOrder.key_id,
         name: activeAddress?.full_name ?? name,
-        email: (profile as any)?.email ?? (user as any)?.email ?? "",
+        email: user?.email ?? "",
         phone: activeAddress?.phone ?? phone,
         description: `${items.length} item${items.length > 1 ? "s" : ""} from MakersFlow`,
       });
@@ -688,7 +694,42 @@ export default function CheckoutScreen() {
         return;
       }
 
+      // Persist the order via backend student-scoped POST /orders/checkout
+      try {
+        const cartItemsForBackend = items.map((item) => ({
+          id: String(item.product.id),
+          price: Number(item.product.price) || 0,
+          qty: item.quantity,
+          is_course: (item.product as any).is_course ?? false,
+          course_id: (item.product as any).course_id ?? null,
+          title: item.product.title,
+        }));
 
+        await orderService.checkoutOrder({
+          total_amount: finalTotal,
+          subtotal: total,
+          tax_amount: taxAmount,
+          discount_amount: discount,
+          order_type: hasPhysical ? 'product' : 'digital',
+          shipping_address: pendingAddress
+            ? {
+                name: pendingAddress.full_name,
+                address: `${pendingAddress.address_line1}${pendingAddress.address_line2 ? `, ${pendingAddress.address_line2}` : ''}`,
+                city: pendingAddress.city,
+                state: pendingAddress.state,
+                pincode: pendingAddress.postal_code ?? pendingAddress.pincode,
+                phone: pendingAddress.phone,
+              }
+            : null,
+          items: cartItemsForBackend,
+          razorpay_order_id: orderId,
+          razorpay_payment_id: paymentId,
+          promo_code: appliedPromo?.code ?? null,
+          coupon_id: appliedPromo?.id ?? null,
+        });
+      } catch (orderSaveErr) {
+        console.error('[Checkout] Failed to persist order via backend:', orderSaveErr);
+      }
 
       // Generate invoice via unified invoiceUtils generator
       try {

@@ -20,89 +20,25 @@
  */
 
 import { ToWords } from "to-words";
-import { supabase } from "@/lib/supabase";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import {
+  settingsService,
+  DEFAULT_SELLER_SETTINGS,
+  type SellerSettings,
+} from "@/services/settingsService";
 
 // ─── Seller constants ────────────────────────────────────────────────────────
 
-// TODO: seller_name, gst_number, cin_number, and seller_address MUST be populated in the public.settings
-// table in Supabase before going to production, as invoices currently have no legally valid GST registration info.
-
-export interface SellerSettings {
-  name: string;
-  tradeName: string;
-  address1?: string;
-  address2?: string;
-  state: string;
-  stateCode: string;
-  gstin: string | null;
-  cin: string | null;
-  phone: string | null;
-  email: string | null;
-  website: string | null;
-}
+export type { SellerSettings };
 
 let cachedSellerSettings: SellerSettings | null = null;
 
 export async function fetchSellerSettings(): Promise<SellerSettings> {
-  if (cachedSellerSettings) return cachedSellerSettings;
-
-  try {
-    const { data: rows, error } = await supabase
-      .from("settings")
-      .select("key, value");
-
-    if (!error && rows) {
-      const map: Record<string, string> = {};
-      for (const r of rows) {
-        if (r.key && r.value) {
-          map[r.key] = r.value.trim();
-        }
-      }
-
-      cachedSellerSettings = {
-        name: map["seller_name"] || map["store_name"] || "EDODWAJA PRIVATE LIMITED",
-        tradeName: map["seller_trade_name"] || "MAKERSFLOW",
-        address1: map["seller_address1"] || undefined,
-        address2: map["seller_address2"] || undefined,
-        state: map["seller_state"] || "Andhra Pradesh",
-        stateCode: map["seller_state_code"] || "37",
-        gstin: map["gst_number"] && map["gst_number"].length > 0 ? map["gst_number"] : null,
-        cin: map["cin_number"] && map["cin_number"].length > 0 ? map["cin_number"] : null,
-        phone: map["store_phone"] || map["seller_phone"] || null,
-        email: map["support_email"] || map["seller_email"] || null,
-        website: map["website"] || "www.makersflow.in",
-      };
-      return cachedSellerSettings;
-    }
-  } catch (err) {
-    console.warn("[Invoice] Error fetching seller settings:", err);
-  }
-
-  // Honest fallback without fabricated GSTIN or CIN strings
-  return {
-    name: "EDODWAJA PRIVATE LIMITED",
-    tradeName: "MAKERSFLOW",
-    state: "Andhra Pradesh",
-    stateCode: "37",
-    gstin: null,
-    cin: null,
-    phone: null,
-    email: null,
-    website: "www.makersflow.in",
-  };
+  cachedSellerSettings = await settingsService.getSellerSettings();
+  return cachedSellerSettings;
 }
 
-export const SELLER: SellerSettings = {
-  name: "EDODWAJA PRIVATE LIMITED",
-  tradeName: "MAKERSFLOW",
-  state: "Andhra Pradesh",
-  stateCode: "37",
-  gstin: null,
-  cin: null,
-  phone: null,
-  email: null,
-  website: "www.makersflow.in",
-};
+export const SELLER: SellerSettings = DEFAULT_SELLER_SETTINGS;
 
 // ─── Indian state → GST state code map ──────────────────────────────────────
 
@@ -146,19 +82,35 @@ export async function generateInvoiceNumber(): Promise<string> {
   const fyStart = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
   const fyLabel = `${fyStart}-${String(fyStart + 1).slice(-2)}`; // e.g. "2025-26"
 
-  // Atomically increment counter in Supabase settings table
-  const key = `invoice_seq_${fyStart}`;
-  const { data: existing } = await supabase
-    .from("settings")
-    .select("value")
-    .eq("key", key)
-    .maybeSingle();
+  const localKey = `@invoice_seq_${fyStart}`;
+  let currentSeq = 0;
+  try {
+    const stored = await AsyncStorage.getItem(localKey);
+    if (stored) {
+      currentSeq = Number(stored);
+    }
+  } catch {
+    currentSeq = 0;
+  }
 
-  const next = existing ? Number(existing.value) + 1 : 1;
+  if (!currentSeq) {
+    try {
+      const remote = await settingsService.getSetting(`invoice_seq_${fyStart}`);
+      if (remote?.value) {
+        currentSeq = Number(remote.value);
+      }
+    } catch {
+      // ignore
+    }
+  }
 
-  await supabase
-    .from("settings")
-    .upsert({ key, value: String(next) }, { onConflict: "key" });
+  const next = currentSeq > 0 ? currentSeq + 1 : Math.floor(1000 + Math.random() * 9000);
+
+  try {
+    await AsyncStorage.setItem(localKey, String(next));
+  } catch {
+    // ignore
+  }
 
   return `INV/${fyLabel}/${String(next).padStart(5, "0")}`;
 }

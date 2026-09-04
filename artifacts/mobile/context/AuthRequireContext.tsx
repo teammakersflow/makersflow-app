@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
-import { useAuth } from '@/context/AuthContextSupabase';
+import { useAuth } from '@/context/AuthContext';
 import { AuthPromptModal } from '@/components/AuthPromptModal';
 
 interface AuthRequireContextType {

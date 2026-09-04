@@ -1,6 +1,5 @@
 import { Feather, Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
-import { supabase } from "@/lib/supabase";
 import { router } from "expo-router";
 import React, { useState } from "react";
 import {
@@ -18,7 +17,7 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { LinearGradient } from "expo-linear-gradient";
-import { useAuth } from "@/context/AuthContextSupabase";
+import { useAuth } from "@/context/AuthContext";
 import { useColors } from "@/hooks/useColors";
 import { useNetwork } from "@/context/NetworkContext";
 import { TEXT_STYLES } from "@/constants/typography";

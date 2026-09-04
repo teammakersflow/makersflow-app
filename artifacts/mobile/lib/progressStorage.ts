@@ -1,5 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { supabase } from './supabase';
+import { apiClient } from '@/lib/auth/apiClient';
 import { getCourseModules } from '@/services/courseDataProvider';
 import { emitSessionExpired, isAuthError } from './sessionEvents';
 
@@ -21,7 +21,6 @@ export function computeCoursePercentage(
   if (ratio > 0) return Math.min(ratio, 99);
   return avgWatchPercentage > 0 ? 1 : 0;
 }
-
 
 export interface UserCourseProgress {
   userId: string;
@@ -154,89 +153,32 @@ export const ProgressStorage = {
   },
 };
 
-async function checkCourseCompletionAndSetCompletedAt(userId: string, courseId: string | number) {
+/**
+ * Marks a lesson complete via POST /lesson-progress/sync
+ * Identity is derived purely from JWT bearer token.
+ */
+export async function markLessonComplete(
+  userId: string,
+  courseId: string | number,
+  lessonId: string | number,
+) {
   try {
-    const { data: modules } = await supabase
-      .from('modules')
-      .select('id')
-      .eq('course_id', Number(courseId));
-    const moduleIds = (modules ?? []).map((m) => m.id);
-    if (moduleIds.length === 0) return;
-
-    const { data: lessons } = await supabase
-      .from('lessons')
-      .select('id')
-      .in('module_id', moduleIds);
-    const lessonIds = (lessons ?? []).map((l) => l.id);
-    if (lessonIds.length === 0) return;
-
-    const { data: progress } = await supabase
-      .from('lesson_progress')
-      .select('lesson_id, is_completed')
-      .eq('user_id', userId)
-      .in('lesson_id', lessonIds);
-
-    const completedCount = (progress ?? []).filter((p) => p.is_completed).length;
-
-    if (completedCount === lessonIds.length) {
-      await supabase
-        .from('enrollments')
-        .update({ completed_at: new Date().toISOString() })
-        .eq('user_id', userId)
-        .eq('course_id', Number(courseId));
-    } else {
-      await supabase
-        .from('enrollments')
-        .update({ completed_at: null })
-        .eq('user_id', userId)
-        .eq('course_id', Number(courseId))
-        .not('completed_at', 'is', null);
-    }
-  } catch (err) {
-    console.error('[progressStorage] checkCourseCompletionAndSetCompletedAt failed:', err);
-  }
-}
-
-export async function markLessonComplete(userId: string, courseId: string | number, lessonId: string | number) {
-  // Fetch existing progress and lesson duration to preserve accumulated time
-  const [existingProgress, lessonData] = await Promise.all([
-    supabase
-      .from('lesson_progress')
-      .select('time_spent_secs')
-      .eq('user_id', userId)
-      .eq('lesson_id', Number(lessonId))
-      .maybeSingle(),
-    supabase
-      .from('lessons')
-      .select('duration_secs')
-      .eq('id', Number(lessonId))
-      .maybeSingle(),
-  ]);
-
-  const existingSecs = existingProgress.data?.time_spent_secs || 0;
-  const durationSecs = lessonData.data?.duration_secs || 0;
-  // Use whichever is larger: what was already tracked or the lesson duration
-  const timeSpentSecs = Math.max(existingSecs, durationSecs);
-
-  const { error } = await supabase.from('lesson_progress').upsert(
-    {
-      user_id: userId,
-      lesson_id: Number(lessonId),
+    await apiClient.post('/lesson-progress/sync', {
       course_id: Number(courseId),
+      lesson_id: Number(lessonId),
       is_completed: true,
       watch_percentage: 100,
-      time_spent_secs: timeSpentSecs,
-      last_watched_at: new Date().toISOString(),
-    },
-    { onConflict: 'user_id,course_id,lesson_id' },
-  );
-  if (error) {
+    });
+  } catch (error: any) {
     if (isAuthError(error)) emitSessionExpired();
-    throw error;
+    console.warn('[progressStorage] markLessonComplete error:', error);
   }
-  await checkCourseCompletionAndSetCompletedAt(userId, courseId);
 }
 
+/**
+ * Upserts lesson playback progress via POST /lesson-progress/sync
+ * Identity is derived purely from JWT bearer token.
+ */
 export async function upsertLessonProgress(
   userId: string,
   courseId: string | number,
@@ -244,146 +186,115 @@ export async function upsertLessonProgress(
   currentTimeSecs: number,
   watchPercentage: number,
 ) {
-  const { data: currentProgress } = await supabase
-    .from('lesson_progress')
-    .select('is_completed, watch_percentage')
-    .eq('user_id', userId)
-    .eq('lesson_id', Number(lessonId))
-    .maybeSingle();
-
-  const wasCompleted = currentProgress?.is_completed === true;
-  const isCompleted = wasCompleted || (watchPercentage >= 90);
-  const currentPct = currentProgress?.watch_percentage || 0;
-  const finalPct = wasCompleted ? 100 : Math.max(currentPct, Math.round(watchPercentage));
-
-  // Accumulate time: use the larger of current position or what was already stored
-  const { data: existingRow } = await supabase
-    .from('lesson_progress')
-    .select('time_spent_secs')
-    .eq('user_id', userId)
-    .eq('lesson_id', Number(lessonId))
-    .maybeSingle();
-
-  const accumulatedSecs = Math.max(
-    existingRow?.time_spent_secs || 0,
-    Math.floor(currentTimeSecs)
-  );
-
-  const { error } = await supabase.from('lesson_progress').upsert(
-    {
-      user_id: userId,
-      lesson_id: Number(lessonId),
+  try {
+    const isCompleted = watchPercentage >= 90;
+    await apiClient.post('/lesson-progress/sync', {
       course_id: Number(courseId),
+      lesson_id: Number(lessonId),
       current_time_secs: Math.floor(currentTimeSecs),
-      watch_percentage: finalPct,
-      time_spent_secs: accumulatedSecs,
-      is_completed: isCompleted,
-      last_watched_at: new Date().toISOString(),
-    },
-    { onConflict: 'user_id,course_id,lesson_id' },
-  );
-  if (error) {
+      watch_percentage: Math.round(watchPercentage),
+      time_spent_secs: Math.floor(currentTimeSecs),
+      is_completed: isCompleted ? true : undefined,
+    });
+  } catch (error: any) {
     console.error('[progress] upsert error', error);
-    // Token refresh failed mid-lesson → surface a re-login prompt instead of
-    // silently dropping progress saves (see sessionEvents listener in learn.tsx)
     if (isAuthError(error)) emitSessionExpired();
-  } else {
-    await checkCourseCompletionAndSetCompletedAt(userId, courseId);
   }
 }
 
-export async function fetchCourseProgress(userId: string, courseId: string | number) {
-  const { data: modules } = await supabase
-    .from('modules')
-    .select('id')
-    .eq('course_id', Number(courseId));
-  const moduleIds = (modules ?? []).map((m) => m.id);
-  if (moduleIds.length === 0) return { completed: 0, total: 0, percentage: 0, watchMinutes: 0 };
+/**
+ * Fetches course-level progress via GET /lesson-progress/course/:courseId
+ */
+export async function fetchCourseProgress(
+  _userId: string,
+  courseId: string | number,
+) {
+  try {
+    const res = await apiClient.get<any>(`/lesson-progress/course/${courseId}`);
+    const data = res?.data || res;
 
-  const { data: lessons } = await supabase
-    .from('lessons')
-    .select('id')
-    .in('module_id', moduleIds);
-  const lessonIds = (lessons ?? []).map((l) => l.id);
-  if (lessonIds.length === 0) return { completed: 0, total: 0, percentage: 0, watchMinutes: 0 };
+    if (data && data.totalLessons !== undefined) {
+      const completed = data.completedLessonsCount || 0;
+      const total = data.totalLessons || 0;
+      const percentage = data.completionPercentage || 0;
+      const watchMinutes = (data.totalTimeSpentSecs || 0) / 60;
 
-  const { data: progress } = await supabase
-    .from('lesson_progress')
-    .select('lesson_id, is_completed, time_spent_secs, watch_percentage')
-    .eq('user_id', userId)
-    .in('lesson_id', lessonIds);
+      return { completed, total, percentage, watchMinutes };
+    }
 
-  const completed = (progress ?? []).filter((p) => p.is_completed).length;
-  const total = lessonIds.length;
-
-  const totalTimeSpentSecs = (progress ?? []).reduce((sum, p) => sum + (p.time_spent_secs || 0), 0);
-  const watchMinutes = totalTimeSpentSecs / 60;
-
-  const totalWatchPercentage = (progress ?? []).reduce((sum, p) => sum + (p.watch_percentage || 0), 0);
-  const avgWatchPercentage = total ? Math.round(totalWatchPercentage / total) : 0;
-
-  // ── FIX ────────────────────────────────────────────────────────────────────
-  // Three different formulas were in play across the product:
-  //   * here                   -> average watch_percentage       (Courses tab: 78%)
-  //   * fetchRemoteProgress()  -> completion ratio + 100% clamp  (Home card: 100%)
-  //   * web lib/learn-data.ts  -> completedLessons / totalLessons (web: 100%)
-  // The same finished course reported 78% and 100% on two screens of the SAME
-  // app, and a third number on web. Standardise on the completion ratio: it is
-  // the figure the UI already prints beside it ("8 / 8 lessons").
-  const percentage = computeCoursePercentage(completed, total, avgWatchPercentage);
-
-  return { completed, total, percentage, watchMinutes };
+    return { completed: 0, total: 0, percentage: 0, watchMinutes: 0 };
+  } catch (error) {
+    console.warn('[progressStorage] fetchCourseProgress error, returning 0:', error);
+    return { completed: 0, total: 0, percentage: 0, watchMinutes: 0 };
+  }
 }
 
-export async function fetchCourseLessonsProgress(userId: string, courseId: string | number) {
-  const { data, error } = await supabase
-    .from('lesson_progress')
-    .select('lesson_id, current_time_secs, watch_percentage, is_completed')
-    .eq('user_id', userId)
-    .eq('course_id', Number(courseId));
-  if (error) throw error;
-  return data ?? [];
+/**
+ * Fetches per-lesson progress for a course via GET /lesson-progress/course/:courseId
+ */
+export async function fetchCourseLessonsProgress(
+  _userId: string,
+  courseId: string | number,
+) {
+  try {
+    const res = await apiClient.get<any>(`/lesson-progress/course/${courseId}`);
+    const data = res?.data || res;
+
+    if (data && Array.isArray(data.lessonsProgress)) {
+      return data.lessonsProgress.map((p: any) => ({
+        lesson_id: p.lesson_id,
+        current_time_secs: Number(p.current_time_secs) || 0,
+        watch_percentage: Number(p.watch_percentage) || 0,
+        is_completed: Boolean(p.is_completed),
+        time_spent_secs: Number(p.time_spent_secs) || 0,
+        last_watched_at: p.last_watched_at,
+      }));
+    }
+
+    return [];
+  } catch (error) {
+    console.warn('[progressStorage] fetchCourseLessonsProgress error:', error);
+    return [];
+  }
 }
 
+/**
+ * Fetches complete multi-course progress for student via backend APIs
+ */
 export async function fetchRemoteProgress(userId: string): Promise<UserCourseProgress[]> {
   try {
-    const { data: enrollments, error: enrollError } = await supabase
-      .from('enrollments')
-      .select('course_id, enrolled_at, completed_at')
-      .eq('user_id', userId);
+    const { fetchEnrolledCourses } = require('@/services/enrollmentService');
+    const enrollments = await fetchEnrolledCourses(userId);
 
-    if (enrollError || !enrollments) return [];
+    if (!enrollments || !Array.isArray(enrollments)) return [];
 
-    const { data: lessonProgress, error: progressError } = await supabase
-      .from('lesson_progress')
-      .select('lesson_id, course_id, current_time_secs, watch_percentage, time_spent_secs, is_completed, last_watched_at')
-      .eq('user_id', userId);
-
-    const progressList = lessonProgress ?? [];
     const results: UserCourseProgress[] = [];
 
     for (const enrollment of enrollments) {
-      const courseId = String(enrollment.course_id);
-      const modules = await getCourseModules(courseId);
+      const courseId = String(enrollment.course_id || enrollment.courses?.id);
+      if (!courseId) continue;
+
+      const [modules, courseProgRes] = await Promise.all([
+        getCourseModules(courseId).catch(() => []),
+        apiClient.get<any>(`/lesson-progress/course/${courseId}`).catch(() => null),
+      ]);
+
+      const courseProgData = courseProgRes?.data || courseProgRes;
+      const progressList: any[] = courseProgData?.lessonsProgress || [];
 
       const courseProgressObj: UserCourseProgress = {
         userId,
         courseId,
-        progress: 0,
+        progress: courseProgData?.completionPercentage || 0,
         enrolledAt: enrollment.enrolled_at || new Date().toISOString(),
         lastAccessedAt: enrollment.enrolled_at || new Date().toISOString(),
         completedAt: enrollment.completed_at || undefined,
-        totalTimeSpent: 0,
+        totalTimeSpent: courseProgData?.totalTimeSpentSecs || 0,
         modules: {},
       };
 
-      let totalLessons = 0;
-      let completedLessons = 0;
-
-      modules.forEach((mod: any) => {
+      (modules || []).forEach((mod: any) => {
         const modLessons = mod.lessons ?? [];
-        totalLessons += modLessons.length;
-
         let modTimeSpent = 0;
         let modLastAccessed = enrollment.enrolled_at || new Date().toISOString();
         let modIsCompleted = modLessons.length > 0;
@@ -396,9 +307,7 @@ export async function fetchRemoteProgress(userId: string): Promise<UserCoursePro
             if (lp.last_watched_at && new Date(lp.last_watched_at) > new Date(modLastAccessed)) {
               modLastAccessed = lp.last_watched_at;
             }
-            if (lp.is_completed) {
-              completedLessons++;
-            } else {
+            if (!lp.is_completed) {
               modIsCompleted = false;
             }
             if (lp.watch_percentage > 0) {
@@ -415,12 +324,15 @@ export async function fetchRemoteProgress(userId: string): Promise<UserCoursePro
         }
 
         const firstLesson = modLessons[0];
-        const lastWatchedLesson = modLessons.find((les: any) => {
-          const lp = progressList.find((p) => String(p.lesson_id) === String(les.id));
-          return lp && !lp.is_completed;
-        }) || firstLesson;
+        const lastWatchedLesson =
+          modLessons.find((les: any) => {
+            const lp = progressList.find((p) => String(p.lesson_id) === String(les.id));
+            return lp && !lp.is_completed;
+          }) || firstLesson;
 
-        const lp = lastWatchedLesson ? progressList.find((p) => String(p.lesson_id) === String(lastWatchedLesson.id)) : null;
+        const lp = lastWatchedLesson
+          ? progressList.find((p) => String(p.lesson_id) === String(lastWatchedLesson.id))
+          : null;
 
         courseProgressObj.modules[mod.id] = {
           moduleId: mod.id,
@@ -429,7 +341,9 @@ export async function fetchRemoteProgress(userId: string): Promise<UserCoursePro
           videoProgress: {
             videoUrl: lastWatchedLesson?.video_url || "",
             currentTime: lp?.current_time_secs || 0,
-            duration: lp?.current_time_secs ? Math.round(lp.current_time_secs / ((lp.watch_percentage || 1) / 100)) : 0,
+            duration: lp?.current_time_secs
+              ? Math.round(lp.current_time_secs / ((lp.watch_percentage || 1) / 100))
+              : 0,
             watchedPercentage: lp?.watch_percentage || 0,
             isCompleted: lp?.is_completed || false,
             lastWatchedAt: lp?.last_watched_at || modLastAccessed,
@@ -444,58 +358,13 @@ export async function fetchRemoteProgress(userId: string): Promise<UserCoursePro
           }).length,
         };
 
-        courseProgressObj.totalTimeSpent += modTimeSpent;
         if (new Date(modLastAccessed) > new Date(courseProgressObj.lastAccessedAt)) {
           courseProgressObj.lastAccessedAt = modLastAccessed;
         }
       });
 
-      // Calculate average watch percentage across all lessons in this course
-      let watchPctSum = 0;
-      modules.forEach((mod: any) => {
-        const modLessons = mod.lessons ?? [];
-        modLessons.forEach((les: any) => {
-          const lp = progressList.find((p) => String(p.lesson_id) === String(les.id));
-          if (lp) {
-            watchPctSum += lp.watch_percentage || 0;
-          }
-        });
-      });
-      // Same helper as fetchCourseProgress so Home and the Courses tab can never
-      // disagree about the same course again.
-      const avgWatchPct = totalLessons ? Math.round(watchPctSum / totalLessons) : 0;
-      const computedPct = computeCoursePercentage(completedLessons, totalLessons, avgWatchPct);
-
-      const allLessonsCompleted = totalLessons > 0 && completedLessons === totalLessons;
-
-      if (allLessonsCompleted) {
-        courseProgressObj.progress = 100;
-        if (!enrollment.completed_at) {
-          const nowStr = new Date().toISOString();
-          await supabase
-            .from('enrollments')
-            .update({ completed_at: nowStr })
-            .eq('user_id', userId)
-            .eq('course_id', Number(courseId));
-          courseProgressObj.completedAt = nowStr;
-
-          // Dispatch Course Completion push notification
-          sendCourseCompletionPush(userId, courseId).catch(() => {});
-        } else {
-          courseProgressObj.completedAt = enrollment.completed_at;
-        }
-      } else {
-        courseProgressObj.progress = computedPct;
-        courseProgressObj.completedAt = undefined;
-        if (enrollment.completed_at) {
-          await supabase
-            .from('enrollments')
-            .update({ completed_at: null })
-            .eq('user_id', userId)
-            .eq('course_id', Number(courseId));
-        }
-      }
-
+      // Save to local ProgressStorage for offline support
+      await ProgressStorage.saveCourseProgress(courseProgressObj);
       results.push(courseProgressObj);
     }
 
@@ -505,27 +374,3 @@ export async function fetchRemoteProgress(userId: string): Promise<UserCoursePro
     return [];
   }
 }
-
-async function sendCourseCompletionPush(userId: string, courseId: string) {
-  try {
-    const { data: course } = await supabase
-      .from('courses')
-      .select('title')
-      .eq('id', Number(courseId))
-      .maybeSingle();
-
-    const courseTitle = course?.title || 'your course';
-
-    await supabase.functions.invoke('send-push-notification', {
-      body: {
-        user_ids: [userId],
-        title: '🎓 Course Completed!',
-        body: `Congratulations! You've completed "${courseTitle}". Your certificate is ready to view and download.`,
-        data: { screen: 'certificate', courseId: String(courseId) },
-      },
-    });
-  } catch (err) {
-    console.warn('[Push] Course completion push error:', err);
-  }
-}
-

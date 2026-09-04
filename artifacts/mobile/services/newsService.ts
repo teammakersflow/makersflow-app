@@ -1,4 +1,4 @@
-import { supabase } from '@/lib/supabase';
+import { apiClient } from '@/lib/auth/apiClient';
 
 const newsThumbnails = [
   require('@/assets/images/news_1.webp'),
@@ -8,7 +8,7 @@ const newsThumbnails = [
   require('@/assets/images/news_5.webp'),
 ];
 
-const getDeterministicThumbnail = (id: string) => {
+export const getDeterministicThumbnail = (id: string) => {
   let hash = 0;
   for (let i = 0; i < id.length; i++) {
     hash = id.charCodeAt(i) + ((hash << 5) - hash);
@@ -30,98 +30,96 @@ export interface NewsArticle {
   tags: string[];
 }
 
-export async function fetchAllNews(): Promise<NewsArticle[]> {
-  const { data, error } = await supabase
-    .from('news')
-    .select('id, title, slug, content, created_at')
-    .eq('status', 'published')
-    .order('created_at', { ascending: false });
-
-  if (error) {
-    console.error('[newsService] Error fetching news:', error);
-    throw error;
-  }
-
-  if (!data || data.length === 0) return [];
-
-  return data.map((row: any) => {
-    const rawContent = row.content || "";
-    // Clean markdown/HTML snippets for summary
-    const cleanText = rawContent
-      .replace(/[#*`_\[\]()]/g, '')
-      .replace(/\s+/g, ' ')
-      .trim();
-    const summary = cleanText
-      ? (cleanText.substring(0, 110) + (cleanText.length > 110 ? "..." : ""))
-      : "Stay updated with the latest news and announcements from MakersFlow.";
-
-    const wordCount = rawContent.split(/\s+/).length || 0;
-    const readMinutes = Math.max(1, Math.round(wordCount / 200));
-
-    // Format date: Jun 6, 2026
-    const formattedDate = new Date(row.created_at).toLocaleDateString("en-US", {
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-    });
-
-    return {
-      id: String(row.id),
-      title: row.title,
-      content: rawContent,
-      summary,
-      category: "Announcement",
-      author: "MakersFlow Team",
-      date: formattedDate,
-      readTime: `${readMinutes} min read`,
-      thumbnail: getDeterministicThumbnail(String(row.id)),
-      tags: ["MakersFlow", "Update"],
-    };
-  });
-}
-
-export async function fetchNewsById(id: string): Promise<NewsArticle | null> {
-  const { data, error } = await supabase
-    .from('news')
-    .select('id, title, slug, content, created_at')
-    .eq('id', id)
-    .single();
-
-  if (error) {
-    console.error(`[newsService] Error fetching news article ${id}:`, error);
-    throw error;
-  }
-
-  if (!data) return null;
-
-  const rawContent = data.content || "";
+export function mapBackendNews(row: any): NewsArticle {
+  const rawContent = row.content || '';
+  // Clean markdown/HTML snippets for summary
   const cleanText = rawContent
     .replace(/[#*`_\[\]()]/g, '')
     .replace(/\s+/g, ' ')
     .trim();
-  const summary = cleanText
-    ? (cleanText.substring(0, 110) + (cleanText.length > 110 ? "..." : ""))
-    : "Stay updated with the latest news and announcements from MakersFlow.";
 
-  const wordCount = rawContent.split(/\s+/).length || 0;
+  const summary = cleanText
+    ? cleanText.substring(0, 110) + (cleanText.length > 110 ? '...' : '')
+    : 'Stay updated with the latest news and announcements from MakersFlow.';
+
+  const wordCount = rawContent.split(/\s+/).filter(Boolean).length || 0;
   const readMinutes = Math.max(1, Math.round(wordCount / 200));
 
-  const formattedDate = new Date(data.created_at).toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
+  let formattedDate = 'Recent';
+  if (row.created_at) {
+    try {
+      formattedDate = new Date(row.created_at).toLocaleDateString('en-US', {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+      });
+    } catch {
+      formattedDate = 'Recent';
+    }
+  }
+
+  const thumbnail = row.thumbnail_url
+    ? { uri: row.thumbnail_url }
+    : getDeterministicThumbnail(String(row.id));
 
   return {
-    id: String(data.id),
-    title: data.title,
+    id: String(row.id),
+    title: row.title || 'Untitled Article',
     content: rawContent,
     summary,
-    category: "Announcement",
-    author: "MakersFlow Team",
+    category: row.category || 'Announcement',
+    author: row.author || 'MakersFlow Team',
     date: formattedDate,
     readTime: `${readMinutes} min read`,
-    thumbnail: getDeterministicThumbnail(String(data.id)),
-    tags: ["MakersFlow", "Update"],
+    thumbnail,
+    tags: Array.isArray(row.tags) ? row.tags : ['MakersFlow', 'Update'],
   };
 }
+
+export async function fetchAllNews(): Promise<NewsArticle[]> {
+  try {
+    const response = await apiClient.get<any>('/news');
+    const rawList = Array.isArray(response)
+      ? response
+      : (Array.isArray(response?.data) ? response.data : []);
+
+    if (!rawList || rawList.length === 0) return [];
+
+    return rawList
+      .filter((row: any) => !row.status || row.status === 'published' || row.status === 'active')
+      .map((row: any) => mapBackendNews(row));
+  } catch (error) {
+    console.error('[newsService] Error fetching news:', error);
+    throw error;
+  }
+}
+
+export async function fetchNewsById(id: string | number): Promise<NewsArticle | null> {
+  if (!id || String(id) === 'undefined' || String(id) === 'null') {
+    return null;
+  }
+
+  try {
+    const response = await apiClient.get<any>(`/news/${id}`);
+    const raw = response?.data !== undefined && response?.success !== undefined ? response.data : response;
+
+    if (!raw || typeof raw !== 'object' || !raw.id) {
+      return null;
+    }
+
+    return mapBackendNews(raw);
+  } catch (error: any) {
+    if (error?.status === 404) {
+      return null;
+    }
+    console.error(`[newsService] Error fetching news article ${id}:`, error);
+    throw error;
+  }
+}
+
+export const newsService = {
+  getAll: fetchAllNews,
+  getNews: fetchAllNews,
+  getById: fetchNewsById,
+  getNewsById: fetchNewsById,
+};

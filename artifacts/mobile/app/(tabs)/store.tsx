@@ -21,7 +21,7 @@ import { useCart } from "@/context/CartContext";
 import { Product } from "@/data/mockData";
 import { useColors } from "@/hooks/useColors";
 import { storeRepository } from "@/repositories/storeRepository";
-import { useAuth } from "@/context/AuthContextSupabase";
+import { useAuth } from "@/context/AuthContext";
 import { useNetwork } from "@/context/NetworkContext";
 import { useTabSwipe } from "@/hooks/useTabSwipe";
 

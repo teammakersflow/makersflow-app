@@ -17,18 +17,18 @@ import Svg, { Circle, Defs, LinearGradient as SvgLinearGradient, Stop } from "re
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { SPACING } from "@/constants/spacing";
 import { useProgress } from "@/context/ProgressContext";
-import { fetchAllCourses, getCourseModules } from "@/services/courseDataProvider";
+import { fetchAllCourses, getCourseModules, fetchLessonDurations } from "@/services/courseDataProvider";
 import { useColors } from "@/hooks/useColors";
 import { ProgressAnalytics } from "@/lib/progressAnalytics";
 import { ProgressStats } from "@/components/ProgressStats";
 import { WatchlistCard } from "@/components/WatchlistCard";
 import { SectionHeader } from "@/components/SectionHeader";
-import { useAuth } from "@/context/AuthContextSupabase";
+import { useAuth } from "@/context/AuthContext";
 import { fetchEnrolledCourses } from "@/services/enrollmentService";
 import { supabase } from "@/lib/supabase";
 import { ProgressCalculator } from "@/lib/progressCalculator";
 import { HomeSkeleton } from "@/components/SkeletonLoader";
-import { fetchCourseProgress } from "@/lib/progressStorage";
+import { fetchCourseProgress, fetchCourseLessonsProgress } from "@/lib/progressStorage";
 
 function formatTotalTime(totalMinutes: number): string {
   const minutes = Math.round(totalMinutes);
@@ -108,14 +108,7 @@ export default function ProgressScreen() {
       const totalCoursesEnrolled = enrollments.length;
       setEnrolledCount(totalCoursesEnrolled);
 
-      const { data: progressData, error: progressError } = await supabase
-        .from('lesson_progress')
-        .select('course_id, lesson_id, time_spent_secs, is_completed, last_watched_at')
-        .eq('user_id', user.id);
-
-      if (progressError) throw progressError;
-      const progressList = progressData ?? [];
-
+      const progressList: any[] = [];
       let completedCoursesCount = 0;
       let coursesInProgress = 0;
       let progressSum = 0;
@@ -129,6 +122,21 @@ export default function ProgressScreen() {
         // Use same fetchCourseProgress function
         const prog = await fetchCourseProgress(user.id, courseId);
         const courseProgPct = prog.percentage;
+
+        try {
+          const lessons = await fetchCourseLessonsProgress(user.id, courseId);
+          lessons.forEach((lp: any) => {
+            progressList.push({
+              course_id: Number(courseId),
+              lesson_id: Number(lp.lesson_id),
+              time_spent_secs: lp.time_spent_secs || lp.current_time_secs || 0,
+              is_completed: lp.is_completed,
+              last_watched_at: lp.last_watched_at,
+            });
+          });
+        } catch {
+          // ignore
+        }
 
         progressSum += courseProgPct;
 
@@ -154,16 +162,9 @@ export default function ProgressScreen() {
       // Fetch the published duration of every lesson the user has touched so
       // learning time reflects real lesson durations (dynamic, not estimates).
       const touchedLessonIds = Array.from(new Set(progressList.map((p) => p.lesson_id).filter(Boolean)));
-      const lessonDurationSecs = new Map<number, number>();
-      if (touchedLessonIds.length > 0) {
-        const { data: lessonRows } = await supabase
-          .from('lessons')
-          .select('id, duration_secs')
-          .in('id', touchedLessonIds);
-        (lessonRows ?? []).forEach((l: any) => {
-          lessonDurationSecs.set(Number(l.id), Number(l.duration_secs) || 0);
-        });
-      }
+      const lessonDurationSecs = touchedLessonIds.length > 0
+        ? await fetchLessonDurations(touchedLessonIds)
+        : new Map<number, number>();
 
       // Credited time per lesson: completed lessons count their full published
       // duration; in-progress lessons count actual watch time.

@@ -21,7 +21,7 @@
  * TTL expiry returns stale=true on RepositoryResult; next online load overwrites.
  */
 
-import { supabase } from '@/lib/supabase';
+import { productService } from '@/services/productService';
 import { STORAGE_KEYS } from '@/constants/storageKeys';
 import { CACHE_POLICY } from '@/constants/cachePolicy';
 import { cacheManager, networkResult, cacheResult, RepositoryResult } from '@/services/cacheManager';
@@ -126,17 +126,8 @@ function mapRow(row: any, index: number): Product {
 
 // ── Remote fetcher ───────────────────────────────────────────────────────────
 async function fetchProducts(): Promise<Product[]> {
-  // TECH DEBT NOTE: Allowlist filter for public product statuses.
-  // Consider switching to denylist (.neq status draft/archived/inactive) in future refactors.
-  const { data, error } = await supabase
-    .from('products')
-    .select(
-      'id, title, slug, description, price, original_price, category, subcategory, thumbnail_url, images, videos, in_stock, status, is_course, course_id, weight_kg'
-    )
-    .or('status.eq.available,status.eq.active,status.eq.sold_out,status.eq.out_of_stock');
-
-  if (error) throw error;
-  return (data ?? []).map((row, idx) => mapRow(row, idx));
+  const { products } = await productService.getProducts({ limit: 100 });
+  return products;
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────

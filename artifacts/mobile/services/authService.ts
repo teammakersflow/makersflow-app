@@ -89,8 +89,8 @@ export async function getSession() {
           email: user.email,
           app_metadata: {},
           user_metadata: {
-            full_name: user.name,
-            avatar_url: user.profileImage,
+            full_name: user.name || user.full_name,
+            avatar_url: user.profileImage || user.avatar_url,
           },
           aud: 'authenticated',
           created_at: new Date().toISOString(),
@@ -101,39 +101,50 @@ export async function getSession() {
 }
 
 /**
- * Get user profile from database (Supabase DB)
+ * Get user profile via GET /auth/me
  */
-export async function getProfile(userId: string) {
-  return await supabase
-    .from('profiles')
-    .select('*')
-    .eq('id', userId)
-    .maybeSingle();
+export async function getProfile(_userId?: string) {
+  try {
+    const res = await customAuthService.getCurrentUser();
+    if (res.success && res.data) {
+      return { data: res.data as any, error: null };
+    }
+    return { data: null, error: new Error('Profile not found') };
+  } catch (err: any) {
+    return { data: null, error: err };
+  }
 }
 
 /**
- * Create or update user profile in database (Supabase DB)
+ * Create or update user profile via student-scoped PATCH /users/profile
  */
 export async function createProfile(profileData: {
-  id: string;
-  email: string;
+  id?: string;
+  email?: string;
   full_name: string;
-  role: string;
+  role?: string;
   grade?: string | null;
   school?: string | null;
+  avatar_url?: string | null;
 }) {
-  return await supabase
-    .from('profiles')
-    .upsert(profileData, { onConflict: 'id' })
-    .select()
-    .maybeSingle();
+  try {
+    const res = await customAuthService.updateProfile({
+      full_name: profileData.full_name,
+      grade: profileData.grade ?? undefined,
+      school: profileData.school ?? undefined,
+      avatar_url: profileData.avatar_url ?? undefined,
+    });
+    return { data: res.data as any, error: null };
+  } catch (err: any) {
+    return { data: null, error: err };
+  }
 }
 
 /**
- * Update user profile in database (Supabase DB)
+ * Update user profile via student-scoped PATCH /users/profile
  */
 export async function updateProfile(
-  userId: string,
+  _userId: string,
   updates: {
     full_name?: string;
     grade?: string | null;
@@ -144,38 +155,42 @@ export async function updateProfile(
     phone?: string | null;
   }
 ) {
-  return await supabase
-    .from('profiles')
-    .update(updates)
-    .eq('id', userId)
-    .select()
-    .maybeSingle();
+  try {
+    const res = await customAuthService.updateProfile({
+      full_name: updates.full_name,
+      grade: updates.grade ?? undefined,
+      school: updates.school ?? undefined,
+      avatar_url: updates.avatar_url ?? undefined,
+    });
+    return { data: res.data as any, error: null };
+  } catch (err: any) {
+    return { data: null, error: err };
+  }
 }
 
 /**
- * Legacy password login fallback (pending backend email auth implementation)
+ * Legacy password login stub (Authentication is managed via Google OAuth)
  */
-export async function signInWithPassword(email: string, _password: string) {
-  return await supabase.auth.signInWithPassword({ email, password: _password });
+export async function signInWithPassword(_email: string, _password: string) {
+  return {
+    data: { user: null, session: null },
+    error: { message: 'Password authentication is disabled. Please sign in with Google.' },
+  };
 }
 
 /**
- * Legacy signup fallback (pending backend signup implementation)
+ * Legacy signup stub (Registration is managed via Google OAuth)
  */
 export async function signUp(
-  email: string,
-  password: string,
-  metadata?: { name?: string; grade?: string; school?: string; phone?: string; age?: number },
-  redirectTo?: string
+  _email: string,
+  _password: string,
+  _metadata?: { name?: string; grade?: string; school?: string; phone?: string; age?: number },
+  _redirectTo?: string
 ) {
-  return await supabase.auth.signUp({
-    email,
-    password,
-    options: {
-      data: metadata,
-      emailRedirectTo: redirectTo,
-    },
-  });
+  return {
+    data: { user: null, session: null },
+    error: { message: 'Registration is managed via Google Sign-In. Please use Google.' },
+  };
 }
 
 /**
@@ -202,27 +217,38 @@ export function onAuthStateChange(
 }
 
 /**
- * Password reset fallback
+ * Password reset stub
  */
-export async function resetPasswordForEmail(email: string, redirectTo: string) {
-  return await supabase.auth.resetPasswordForEmail(email, { redirectTo });
+export async function resetPasswordForEmail(_email: string, _redirectTo: string) {
+  return {
+    data: {},
+    error: { message: 'Password reset is not applicable for Google authenticated accounts.' },
+  };
 }
 
 /**
- * Update password fallback
+ * Update password stub
  */
-export async function updatePassword(password: string) {
-  return await supabase.auth.updateUser({ password });
+export async function updatePassword(_password: string) {
+  return {
+    data: { user: null },
+    error: { message: 'Password management is managed via Google Account security.' },
+  };
 }
 
 /**
- * OTP fallback
+ * OTP stub
  */
-export async function sendOtp(phone: string) {
-  return await supabase.auth.signInWithOtp({ phone });
+export async function sendOtp(_phone: string) {
+  return {
+    data: {},
+    error: { message: 'OTP authentication is disabled. Please sign in with Google.' },
+  };
 }
 
-export async function verifyOtp(phone: string, token: string) {
-  return await supabase.auth.verifyOtp({ phone, token, type: 'sms' });
+export async function verifyOtp(_phone: string, _token: string) {
+  return {
+    data: { user: null, session: null },
+    error: { message: 'OTP verification is disabled. Please sign in with Google.' },
+  };
 }
-

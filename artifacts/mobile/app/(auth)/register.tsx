@@ -20,10 +20,10 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { SPACING } from "@/constants/spacing";
-import { useAuth } from "@/context/AuthContextSupabase";
+import { useAuth } from "@/context/AuthContext";
 import { useColors } from "@/hooks/useColors";
 import { LinearGradient } from "expo-linear-gradient";
-import { supabase } from "@/lib/supabase";
+import { customAuthService } from "@/lib/auth/customAuthService";
 import { getAvatarSource } from "@/constants/avatars";
 import { AvatarPickerModal } from "@/components/AvatarPickerModal";
 
@@ -85,9 +85,13 @@ export default function RegisterScreen() {
     return "#17E5D3";
   };
 
-  const setProfileAvatar = async (userId: string) => {
+  const setProfileAvatar = async (_userId?: string) => {
     if (!avatarUri) return null;
-    await supabase.from('profiles').update({ avatar_url: avatarUri }).eq('id', userId);
+    try {
+      await customAuthService.updateProfile({ avatar_url: avatarUri });
+    } catch {
+      // Ignore non-fatal avatar sync on initial registration
+    }
     return avatarUri;
   };
 

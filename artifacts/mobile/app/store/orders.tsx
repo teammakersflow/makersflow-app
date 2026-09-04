@@ -5,12 +5,18 @@ import { Alert, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Tex
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { SPACING } from "@/constants/spacing";
 import { useColors } from "@/hooks/useColors";
-import { useAuth } from "@/context/AuthContextSupabase";
-import { supabase } from "@/lib/supabase";
+import { useAuth } from "@/context/AuthContext";
 import * as Sharing from 'expo-sharing';
 import * as Print from 'expo-print';
-import { buildInvoiceHtml, generateInvoiceNumber, fetchSellerSettings, type InvoiceLineItem } from "@/lib/invoiceUtils";
+import {
+  buildInvoiceHtml,
+  generateInvoiceNumber,
+  fetchSellerSettings,
+  type InvoiceLineItem,
+} from "@/lib/invoiceUtils";
 
+
+import { orderService } from "@/services/orderService";
 
 // ── Order Tracking Timeline ───────────────────────────────────────────────────
 const TRACKING_STEPS = [
@@ -135,17 +141,7 @@ export default function OrdersScreen() {
     }
     if (!isRefreshing && !hasLoadedOnce.current) setIsLoading(true);
     try {
-      const { data, error } = await supabase
-        .from('orders')
-        .select('*')
-        .eq('user_id', user.id)
-        .order('created_at', { ascending: false });
-
-
-      if (error) {
-        console.error('[Orders] Error fetching orders:', error);
-        return;
-      }
+      const data = await orderService.getMyOrders();
 
       if (data) {
         const mapped = data.map((order: any) => {
@@ -216,23 +212,7 @@ export default function OrdersScreen() {
 
     setIsSubmittingRefund(true);
     try {
-      const { error: refundError } = await supabase
-        .from('refund_requests')
-        .insert({
-          user_id: user.id,
-          order_id: Number(refundOrderId),
-          reason: refundReason.trim(),
-          status: 'pending'
-        });
-
-      if (refundError) throw refundError;
-
-      const { error: orderError } = await supabase
-        .from('orders')
-        .update({ status: 'refund_requested' })
-        .eq('id', Number(refundOrderId));
-
-      if (orderError) throw orderError;
+      await orderService.requestRefund(refundOrderId, refundReason.trim());
 
       Alert.alert('Submitted', 'Your refund request has been submitted. Our team will review it shortly.');
       
@@ -256,16 +236,9 @@ export default function OrdersScreen() {
       let buyerPhone = '';
       let buyerGstin: string | undefined;
 
-      if (user?.id) {
-        const { data: profile } = await supabase
-          .from('profiles')
-          .select('full_name, phone')
-          .eq('id', user.id)
-          .single();
-        if (profile) {
-          buyerName = profile.full_name || buyerName;
-          buyerPhone = profile.phone || '';
-        }
+      if (user) {
+        buyerName = user.name || buyerName;
+        buyerPhone = user.phone || '';
       }
 
       // Resolve shipping address — stored as JSON object in order.shipping

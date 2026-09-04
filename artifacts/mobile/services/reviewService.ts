@@ -1,4 +1,4 @@
-import { supabase } from "@/lib/supabase";
+import { apiClient } from "@/lib/auth/apiClient";
 
 export interface Review {
   id: string;
@@ -8,54 +8,82 @@ export interface Review {
   comment: string | null;
   status?: "pending" | "approved" | "rejected";
   created_at: string;
+  user?: {
+    id: string;
+    full_name?: string | null;
+    avatar_url?: string | null;
+  } | null;
 }
 
-/** Fetch all reviews for a course, newest first */
+export interface CourseRatingItem {
+  course_id: number;
+  rating: number;
+}
+
+/**
+ * Fetch all reviews for a course, newest first via GET /reviews/course/:courseId
+ */
 export async function fetchCourseReviews(courseId: string | number): Promise<Review[]> {
-  const { data, error } = await supabase
-    .from("reviews")
-    .select("id, user_id, course_id, rating, comment, status, created_at")
-    .eq("course_id", Number(courseId))
-    .order("created_at", { ascending: false })
-    .throwOnError();
-  if (error) throw error;
-  return data ?? [];
+  try {
+    const res = await apiClient.get<any>(`/reviews/course/${courseId}`);
+    const data = res?.data || res;
+    return Array.isArray(data) ? data : [];
+  } catch (error) {
+    console.error(`[ReviewService] fetchCourseReviews error for ${courseId}:`, error);
+    return [];
+  }
 }
 
-/** Fetch the current user's review for a course (or null) */
+/**
+ * Fetch the current authenticated student's review for a course (or null) via GET /reviews/course/:courseId/my.
+ * Student identity is derived exclusively from JWT.
+ */
 export async function fetchMyReview(
-  userId: string,
-  courseId: string | number
+  _userId?: string,
+  courseId?: string | number,
 ): Promise<Review | null> {
-  const { data, error } = await supabase
-    .from("reviews")
-    .select("id, user_id, course_id, rating, comment, status, created_at")
-    .eq("user_id", userId)
-    .eq("course_id", Number(courseId))
-    .maybeSingle();
-  if (error) throw error;
-  return data ?? null;
+  if (!courseId) return null;
+  try {
+    const res = await apiClient.get<any>(`/reviews/course/${courseId}/my`);
+    const data = res?.data !== undefined ? res.data : res;
+    return data || null;
+  } catch (error) {
+    console.error(`[ReviewService] fetchMyReview error for ${courseId}:`, error);
+    return null;
+  }
 }
 
-/** Insert or update the user's review (one per user per course) */
+/**
+ * Insert or update current student's review for a course via POST /reviews/course/:courseId.
+ * Student identity is derived exclusively from JWT.
+ */
 export async function upsertReview(
-  userId: string,
+  _userId: string | undefined,
   courseId: string | number,
   rating: number,
-  comment: string
+  comment: string,
 ): Promise<void> {
-  const { data: existing } = await supabase.from("reviews").select("id, status, comment").eq("user_id", userId).maybeSingle();
-  const isEditingApproved = existing?.status === "approved";
-  const payload: Record<string, any> = { user_id: userId, rating, comment: comment.trim() || null, status: "pending" };
-  if (isEditingApproved) payload.approved_comment = existing.comment;
-  const { error } = await supabase.from("reviews").upsert(
-    {
-      user_id: userId,
-      course_id: Number(courseId),
+  try {
+    await apiClient.post<any>(`/reviews/course/${courseId}`, {
       rating,
-      comment: comment.trim() || null,
-    },
-    { onConflict: "user_id,course_id" }
-  );
-  if (error) throw error;
+      comment: comment?.trim() || undefined,
+    });
+  } catch (error) {
+    console.error(`[ReviewService] upsertReview error for ${courseId}:`, error);
+    throw error;
+  }
+}
+
+/**
+ * Fetch lightweight course ratings summary via GET /reviews/ratings/courses
+ */
+export async function fetchCourseRatingsSummary(): Promise<CourseRatingItem[]> {
+  try {
+    const res = await apiClient.get<any>('/reviews/ratings/courses');
+    const data = res?.data || res;
+    return Array.isArray(data) ? data : [];
+  } catch (error) {
+    console.error('[ReviewService] fetchCourseRatingsSummary error:', error);
+    return [];
+  }
 }

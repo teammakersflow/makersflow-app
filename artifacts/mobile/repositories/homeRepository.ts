@@ -32,10 +32,16 @@ import { CACHE_POLICY } from '@/constants/cachePolicy';
 import { cacheManager, networkResult, cacheResult, RepositoryResult } from '@/services/cacheManager';
 import { isNetworkError } from '@/lib/networkUtils';
 import { firstThumbnailUrl, parseThumbnailUrls } from '@/lib/thumbnailUtils';
-import { fetchAllCourses } from '@/services/courseDataProvider';
+import { fetchAllCourses, fetchLessonDurations } from '@/services/courseDataProvider';
 import { fetchEnrolledCourses } from '@/services/enrollmentService';
-import { fetchCourseProgress } from '@/lib/progressStorage';
+import { fetchCourseProgress, fetchCourseLessonsProgress } from '@/lib/progressStorage';
 import { ProgressCalculator } from '@/lib/progressCalculator';
+import { notificationService } from '@/services/notificationService';
+import { announcementService } from '@/services/announcementService';
+import { fetchCourseRatingsSummary } from '@/services/reviewService';
+import { fetchProductRatingsSummary } from '@/services/productReviewService';
+import { productService } from '@/services/productService';
+import { promotionService } from '@/services/promotionService';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -84,23 +90,14 @@ export const EMPTY_HOME_DATA: HomeData = {
 // ── Remote fetchers ──────────────────────────────────────────────────────────
 
 async function fetchPromotions(): Promise<any[]> {
-  const { data, error } = await supabase
-    .from('promotions')
-    .select('*')
-    .eq('is_active', true)
-    .order('created_at', { ascending: false });
-  if (error) throw error;
-  const now = Date.now();
-  return (data ?? []).filter(
-    (p: any) => !p.expires_at || new Date(p.expires_at).getTime() > now
-  );
+  return promotionService.getPromotions();
 }
 
 async function fetchCourses(): Promise<{ courses: any[]; popularCourses: any[] }> {
   let reviewStats: Record<string, { ratingSum: number; count: number }> = {};
   try {
-    const { data, error } = await supabase.from('reviews').select('course_id, rating');
-    if (!error && data) {
+    const data = await fetchCourseRatingsSummary();
+    if (data && data.length > 0) {
       data.forEach((rev: any) => {
         const id = String(rev.course_id);
         if (!reviewStats[id]) reviewStats[id] = { ratingSum: 0, count: 0 };
@@ -141,8 +138,8 @@ async function fetchCourses(): Promise<{ courses: any[]; popularCourses: any[] }
 async function fetchProducts(): Promise<any[]> {
   let reviewStats: Record<string, { ratingSum: number; count: number }> = {};
   try {
-    const { data: revData } = await supabase.from('product_reviews').select('product_id, rating');
-    if (revData) {
+    const revData = await fetchProductRatingsSummary();
+    if (revData && revData.length > 0) {
       revData.forEach((rev: any) => {
         const id = String(rev.product_id);
         if (!reviewStats[id]) reviewStats[id] = { ratingSum: 0, count: 0 };
@@ -152,102 +149,67 @@ async function fetchProducts(): Promise<any[]> {
     }
   } catch { /* non-critical */ }
 
-  const { data, error } = await supabase
-    .from('products')
-    .select('id, title, description, price, original_price, category, subcategory, thumbnail_url, images, videos, in_stock, status')
-    .or('status.eq.available,status.eq.active,status.eq.sold_out,status.eq.out_of_stock')
-    .neq('category', 'digital')
-    .order('created_at', { ascending: false })
-    .limit(8);
-  if (error) throw error;
-  const fallbacks = [
-    require('@/assets/images/products/product_kit_1.webp'),
-    require('@/assets/images/products/product_kit_2.webp'),
-    require('@/assets/images/products/product_kit_3.webp'),
-  ];
-  return (data ?? []).map((row: any, idx: number) => {
-    const thumbUrl = firstThumbnailUrl(row.thumbnail_url);
-    const thumbnail = thumbUrl ? { uri: thumbUrl } : fallbacks[idx % 3];
+  const { products } = await productService.getProducts({ limit: 16 });
+  const physicalProducts = products.filter((p) => p.category !== 'digital').slice(0, 8);
 
-    // Build images array from admin-saved images column
-    let images: { uri: string }[] | undefined;
-    if (row.images) {
-      let raw = row.images;
-      if (typeof raw === 'string') { try { raw = JSON.parse(raw); } catch { raw = []; } }
-      if (Array.isArray(raw)) {
-        const urls: string[] = raw.map((item: any) => {
-          if (typeof item === 'string') return item;
-          if (item && typeof item === 'object') return item.uri || item.url || item.src || '';
-          return '';
-        }).filter((u: string) => u.startsWith('http'));
-        const ordered = thumbUrl ? [thumbUrl, ...urls.filter((u: string) => u !== thumbUrl)] : urls;
-        const unique = Array.from(new Set(ordered)).map((u: string) => ({ uri: u }));
-        if (unique.length > 0) images = unique;
-      }
-    }
-
-    const stats = reviewStats[String(row.id)];
-    const rating = stats ? Number((stats.ratingSum / stats.count).toFixed(1)) : 0;
-    const reviews = stats ? stats.count : 0;
+  return physicalProducts.map((prod) => {
+    const stats = reviewStats[prod.id];
+    const rating = stats ? Number((stats.ratingSum / stats.count).toFixed(1)) : prod.rating;
+    const reviews = stats ? stats.count : prod.reviews;
 
     return {
-      id: String(row.id),
-      title: row.title || 'Untitled Product',
-      category: 'physical',
-      subcategory: row.subcategory || 'Physical Kits',
-      price: Number(row.price) || 0,
-      originalPrice: Number(row.original_price) || Number(row.price) || 0,
-      thumbnail,
-      images,
-      description: row.description || 'No description available.',
+      ...prod,
       rating,
       reviews,
-      inStock: (row.in_stock === false || row.status === 'sold_out' || row.status === 'out_of_stock') ? false : Boolean(row.in_stock ?? true),
-      features: [],
     };
   });
 }
 
 async function fetchProgress(userId: string): Promise<HomeProgress> {
   const enrollments = await fetchEnrolledCourses(userId);
+  const lpData: any[] = [];
+
   const enrolledCourses = await Promise.all(
     enrollments
       .filter((enr: any) => enr.courses)
       .map(async (enr: any) => {
-        const prog = await fetchCourseProgress(userId, String(enr.courses.id));
+        const cId = String(enr.courses.id);
+        const prog = await fetchCourseProgress(userId, cId);
+        try {
+          const lessons = await fetchCourseLessonsProgress(userId, cId);
+          lessons.forEach((lp: any) => {
+            lpData.push({
+              course_id: Number(cId),
+              lesson_id: Number(lp.lesson_id),
+              time_spent_secs: lp.time_spent_secs || lp.current_time_secs || 0,
+              is_completed: lp.is_completed,
+              last_watched_at: lp.last_watched_at,
+            });
+          });
+        } catch {
+          // ignore
+        }
         return {
-          courseId: String(enr.courses.id),
+          courseId: cId,
           progress: prog.percentage,
           completedAt: enr.completed_at || null,
         };
       })
   );
 
-  const { data: lpData } = await supabase
-    .from('lesson_progress')
-    .select('course_id, lesson_id, time_spent_secs, is_completed, last_watched_at')
-    .eq('user_id', userId);
-
-  const streakResult = lpData ? ProgressCalculator.calculateStreak(lpData) : { current: 0, longest: 0 };
+  const streakResult = lpData.length > 0 ? ProgressCalculator.calculateStreak(lpData) : { current: 0, longest: 0 };
   const learningStreak        = streakResult.current;
   const longestStreak         = streakResult.longest;
-  const totalLessonsCompleted = lpData ? lpData.filter((p) => p.is_completed).length : 0;
+  const totalLessonsCompleted = lpData.filter((p) => p.is_completed).length;
 
   // Learning time reflects real lesson durations: a completed lesson credits
   // its full published duration; in-progress lessons credit actual watch time.
   let totalHoursLearned = 0;
-  if (lpData && lpData.length > 0) {
+  if (lpData.length > 0) {
     const touchedIds = Array.from(new Set(lpData.map((p) => p.lesson_id).filter(Boolean)));
-    const durationById = new Map<number, number>();
-    if (touchedIds.length > 0) {
-      const { data: lessonRows } = await supabase
-        .from('lessons')
-        .select('id, duration_secs')
-        .in('id', touchedIds);
-      (lessonRows ?? []).forEach((l: any) => {
-        durationById.set(Number(l.id), Number(l.duration_secs) || 0);
-      });
-    }
+    const durationById = touchedIds.length > 0
+      ? await fetchLessonDurations(touchedIds)
+      : new Map<number, number>();
     const creditedTotalSecs = lpData.reduce((s, p) => {
       const watched = p.time_spent_secs || 0;
       const duration = durationById.get(Number(p.lesson_id)) || 0;
@@ -259,22 +221,18 @@ async function fetchProgress(userId: string): Promise<HomeProgress> {
   return { enrolledCourses, learningStreak, longestStreak, totalLessonsCompleted, totalHoursLearned };
 }
 
-async function fetchNotificationCount(userId: string): Promise<number> {
+
+async function fetchNotificationCount(_userId?: string): Promise<number> {
   try {
     const lastSeen = await AsyncStorage.getItem('announcements_last_seen');
-    const [personal, broadcast] = await Promise.all([
-      supabase
-        .from('notifications')
-        .select('id', { count: 'exact', head: true })
-        .eq('user_id', userId)
-        .eq('is_read', false),
-      supabase
-        .from('announcements')
-        .select('id', { count: 'exact', head: true })
-        .eq('status', 'published')
-        .gt('created_at', lastSeen ?? '1970-01-01'),
+    const [unreadCount, broadcast] = await Promise.all([
+      notificationService.getUnreadCount().catch(() => 0),
+      announcementService.getActiveAnnouncements().catch(() => []),
     ]);
-    return (personal.count ?? 0) + (broadcast.count ?? 0);
+    const unreadBroadcasts = broadcast.filter(
+      (a: any) => !lastSeen || new Date(a.created_at) > new Date(lastSeen),
+    ).length;
+    return unreadCount + unreadBroadcasts;
   } catch {
     return 0;
   }

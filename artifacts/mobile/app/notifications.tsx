@@ -17,9 +17,10 @@ import {
 import { useFocusEffect } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { SPACING } from "@/constants/spacing";
-import { useAuth } from "@/context/AuthContextSupabase";
+import { useAuth } from "@/context/AuthContext";
 import { useColors } from "@/hooks/useColors";
-import { supabase } from "@/lib/supabase";
+import { notificationService } from "@/services/notificationService";
+import { announcementService } from "@/services/announcementService";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { cacheManager } from "@/services/cacheManager";
 import { useRealtimeNotifications } from "@/lib/realtimeNotifications";
@@ -107,27 +108,27 @@ export default function NotificationsScreen() {
       const lastSeen = await AsyncStorage.getItem(ANNOUNCEMENTS_LAST_SEEN_KEY);
 
       const [personal, broadcast] = await Promise.all([
-        supabase
-          .from("notifications")
-          .select("id, title, body, type, link, is_read, created_at")
-          .eq("user_id", user.id)
-          .order("created_at", { ascending: false })
-          .limit(100),
-        supabase
-          .from("announcements")
-          .select("id, title, message, type, link_url, created_at")
-          .eq("status", "published")
-          .order("created_at", { ascending: false })
-          .limit(50),
+        notificationService.getMyNotifications().catch(() => []),
+        announcementService.getActiveAnnouncements().catch(() => []),
       ]);
 
-      const personalItems: AppNotification[] = (personal.data ?? []) as AppNotification[];
-      const broadcastItems: AppNotification[] = (broadcast.data ?? []).map((a: any) => ({
+      const personalItems: AppNotification[] = (personal ?? []).map((p: any) => ({
+        id: String(p.id),
+        title: p.title,
+        body: p.body ?? p.message ?? null,
+        type: p.type ?? "system",
+        link: p.link_url ?? p.link ?? p.action_url ?? null,
+        is_read: Boolean(p.is_read),
+        created_at: p.created_at,
+        isAnnouncement: false,
+      }));
+
+      const broadcastItems: AppNotification[] = (broadcast ?? []).map((a: any) => ({
         id: `ann-${a.id}`,
         title: a.title,
-        body: a.message,
+        body: a.message ?? a.content ?? null,
         type: a.type ?? "announcement",
-        link: a.link_url,
+        link: a.link_url ?? null,
         created_at: a.created_at,
         isAnnouncement: true,
         is_read: lastSeen ? new Date(a.created_at) <= new Date(lastSeen) : false,
@@ -175,7 +176,11 @@ export default function NotificationsScreen() {
   async function markRead(n: AppNotification) {
     setItems((prev) => prev.map((x) => (x.id === n.id ? { ...x, is_read: true } : x)));
     if (!n.isAnnouncement) {
-      await supabase.from("notifications").update({ is_read: true }).eq("id", n.id);
+      try {
+        await notificationService.markAsRead(n.id);
+      } catch (err) {
+        console.error('[Notifications] markAsRead error:', err);
+      }
     }
   }
 
@@ -183,11 +188,11 @@ export default function NotificationsScreen() {
     if (!user?.id) return;
     await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setItems((prev) => prev.map((n) => ({ ...n, is_read: true })));
-    await supabase
-      .from("notifications")
-      .update({ is_read: true })
-      .eq("user_id", user.id)
-      .eq("is_read", false);
+    try {
+      await notificationService.markAllAsRead();
+    } catch (err) {
+      console.error('[Notifications] markAllAsRead error:', err);
+    }
   }
 
   async function handlePress(n: AppNotification) {
@@ -224,13 +229,9 @@ export default function NotificationsScreen() {
     }
 
     if (!n.isAnnouncement) {
-      const { error } = await supabase
-        .from("notifications")
-        .delete()
-        .eq("id", n.id)
-        .eq("user_id", user.id);
-
-      if (error) {
+      try {
+        await notificationService.deleteNotification(n.id);
+      } catch (error) {
         setItems(previousItems);
         showToast("Failed to delete notification");
         if (__DEV__) console.error("[Notifications] delete failed:", error);

@@ -2,10 +2,26 @@ import { apiRequest } from './apiClient';
 
 export interface AuthUserResponse {
   id: string;
-  name: string;
+  name?: string | null;
+  full_name?: string | null;
   email: string;
   profileImage?: string | null;
+  avatar_url?: string | null;
   role: string;
+  grade?: string | null;
+  school?: string | null;
+  phone?: string | null;
+  age?: number | null;
+  bio?: string | null;
+  onboarding_completed?: boolean;
+  [key: string]: unknown;
+}
+
+export interface UpdateProfileRequest {
+  full_name?: string;
+  grade?: string;
+  school?: string;
+  avatar_url?: string;
 }
 
 export interface AuthTokens {
@@ -33,8 +49,14 @@ export interface AuthMeResponse {
   data: AuthUserResponse;
 }
 
+export interface UpdateProfileResponse {
+  success: boolean;
+  message?: string;
+  data: AuthUserResponse;
+}
+
 /**
- * Custom Backend Authentication Service
+ * Custom Backend Authentication and User Profile Service
  */
 export const customAuthService = {
   /**
@@ -63,6 +85,17 @@ export const customAuthService = {
   async getCurrentUser(): Promise<AuthMeResponse> {
     return await apiRequest<AuthMeResponse>('/auth/me', {
       method: 'GET',
+    });
+  },
+
+  /**
+   * Update student-scoped profile on backend (PATCH /users/profile)
+   * Identity is derived from authenticated JWT Bearer token
+   */
+  async updateProfile(dto: UpdateProfileRequest): Promise<UpdateProfileResponse> {
+    return await apiRequest<UpdateProfileResponse>('/users/profile', {
+      method: 'PATCH',
+      body: JSON.stringify(dto),
     });
   },
 

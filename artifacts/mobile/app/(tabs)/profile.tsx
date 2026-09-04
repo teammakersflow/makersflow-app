@@ -21,16 +21,19 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { SPACING } from "@/constants/spacing";
-import { useAuth } from "@/context/AuthContextSupabase";
+import { useAuth } from "@/context/AuthContext";
 import { AUTH_FEATURE_FLAGS } from "@/lib/auth/authFeatureFlags";
 import { useProgress } from "@/context/ProgressContext";
 import { useColors } from "@/hooks/useColors";
-import { supabase } from "@/lib/supabase";
+import { notificationService } from "@/services/notificationService";
+import { announcementService } from "@/services/announcementService";
 import { getCourseModules } from "@/services/courseDataProvider";
-import { completeCourse } from "@/services/enrollmentService";
+import { completeCourse, fetchEnrolledCourses } from "@/services/enrollmentService";
+import { fetchCourseProgress } from "@/lib/progressStorage";
 import { ProductCard } from "@/components/ProductCard";
 import { CertificateSkeleton, WishlistSkeleton } from "@/components/SkeletonLoader";
 import { Product } from "@/data/mockData";
+import { productService } from "@/services/productService";
 import { useFavorites } from "@/context/FavoritesContext";
 import { getAvatarSource } from "@/constants/avatars";
 
@@ -68,32 +71,11 @@ export default function ProfileScreen() {
     }
     setWishlistLoading(true);
     try {
-      const { data, error } = await supabase
-        .from('products')
-        .select('id, title, description, price, original_price, category, subcategory, thumbnail_url, in_stock, status')
-        .in('id', wishlistProductIds.map(Number));
-      if (!error && data) {
-        const kitFallbacks = [
-          require('@/assets/images/products/product_kit_1.webp'),
-          require('@/assets/images/products/product_kit_2.webp'),
-          require('@/assets/images/products/product_kit_3.webp'),
-        ];
-        const mapped: Product[] = data.map((row: any, idx: number) => ({
-          id: String(row.id),
-          title: row.title || "Untitled Product",
-          category: row.category || 'physical',
-          subcategory: row.subcategory || "Physical Kits",
-          price: Number(row.price) || 0,
-          originalPrice: Number(row.original_price) || Number(row.price) || 0,
-          thumbnail: row.thumbnail_url ? { uri: row.thumbnail_url } : kitFallbacks[idx % 3],
-          description: row.description || "No description available.",
-          rating: 0,
-          reviews: 0,
-          inStock: (row.in_stock === false || row.status === 'sold_out' || row.status === 'out_of_stock') ? false : Boolean(row.in_stock ?? true),
-          features: [],
-        }));
-        setWishlistProducts(mapped);
-      }
+      const results = await Promise.all(
+        wishlistProductIds.map((pid) => productService.getProductById(pid).catch(() => null))
+      );
+      const valid = results.filter((p): p is Product => Boolean(p));
+      setWishlistProducts(valid);
     } catch (err) {
       console.error("[Profile] Error loading wishlist products:", err);
     } finally {
@@ -150,19 +132,14 @@ export default function ProfileScreen() {
         if (!user?.id) return;
         try {
           const lastSeen = await AsyncStorage.getItem('announcements_last_seen');
-          const [personal, broadcast] = await Promise.all([
-            supabase
-              .from('notifications')
-              .select('id', { count: 'exact', head: true })
-              .eq('user_id', user.id)
-              .eq('is_read', false),
-            supabase
-              .from('announcements')
-              .select('id', { count: 'exact', head: true })
-              .eq('status', 'published')
-              .gt('created_at', lastSeen ?? '1970-01-01'),
+          const [unreadCount, broadcast] = await Promise.all([
+            notificationService.getUnreadCount().catch(() => 0),
+            announcementService.getActiveAnnouncements().catch(() => []),
           ]);
-          setUnreadNotifCount((personal.count ?? 0) + (broadcast.count ?? 0));
+          const unreadBroadcasts = broadcast.filter(
+            (a: any) => !lastSeen || new Date(a.created_at) > new Date(lastSeen),
+          ).length;
+          setUnreadNotifCount(unreadCount + unreadBroadcasts);
         } catch {
           setUnreadNotifCount(0);
         }
@@ -174,49 +151,15 @@ export default function ProfileScreen() {
         }
         setCertsLoading(true);
         try {
-          const { data: enrollData, error: countError } = await supabase
-            .from("enrollments")
-            .select("course_id, payment_status, courses(id, is_free)")
-            .eq("user_id", user.id);
+          const validEnrollments = await fetchEnrolledCourses(user.id);
+          setEnrolledCount(validEnrollments.length);
+          setValidCourseIds(validEnrollments.map((enr: any) => String(enr.course_id || enr.courses?.id)));
+          setIsValidLoaded(true);
 
-          if (!countError && enrollData) {
-            const valid = enrollData.filter(
-              (enr: any) =>
-                enr.courses &&
-                (!enr.payment_status ||
-                  ['completed', 'free', 'paid', 'active', 'success'].includes(enr.payment_status) ||
-                  enr.courses.is_free === true)
-            );
-            setEnrolledCount(valid.length);
-            setValidCourseIds(valid.map((enr) => String(enr.course_id)));
-            setIsValidLoaded(true);
-          }
-
-          const { data: enrollments } = await supabase
-            .from("enrollments")
-            .select("course_id, completed_at, enrolled_at, payment_status, courses(title, is_free, level, instructor_id)")
-            .eq("user_id", user.id);
-
-          if (!enrollments) { setCertsLoading(false); return; }
-
-          const validEnrollments = enrollments.filter(
-            (enr: any) =>
-              enr.courses &&
-              (!enr.payment_status ||
-                ['completed', 'free', 'paid', 'active', 'success'].includes(enr.payment_status) ||
-                enr.courses.is_free === true)
-          );
-
-          const { data: progressData } = await supabase
-            .from("lesson_progress")
-            .select("course_id, lesson_id, is_completed")
-            .eq("user_id", user.id);
-
-          const progressList = progressData ?? [];
           const results: CompletedCourse[] = [];
 
           for (const enr of validEnrollments) {
-            const courseId = String(enr.course_id);
+            const courseId = String(enr.course_id || enr.courses?.id);
             const courseTitle = (enr.courses as any)?.title ?? "Unknown Course";
             const level = (enr.courses as any)?.level;
             const instructor = undefined;
@@ -226,18 +169,8 @@ export default function ProfileScreen() {
               continue;
             }
 
-            const modules = await getCourseModules(courseId);
-            const allLessonIds = modules.flatMap((m: any) =>
-              (m.lessons ?? []).map((l: any) => String(l.id))
-            );
-            if (allLessonIds.length === 0) continue;
-
-            const completedIds = progressList
-              .filter((p) => p.is_completed && String(p.course_id) === courseId)
-              .map((p) => String(p.lesson_id));
-
-            const allDone = allLessonIds.every((id: string) => completedIds.includes(id));
-            if (allDone) {
+            const prog = await fetchCourseProgress(user.id, courseId);
+            if (prog.total > 0 && prog.completed >= prog.total) {
               // Auto-persist completed_at to DB so future queries find it on the enrollment row
               completeCourse(user.id, courseId).catch(() => {});
               results.push({
@@ -319,19 +252,10 @@ export default function ProfileScreen() {
       setDeleteError("Please enter your password");
       return;
     }
-    setIsDeleting(true);
-    setDeleteError("");
     try {
-      if (!AUTH_FEATURE_FLAGS.USE_CUSTOM_BACKEND_AUTH) {
-        const { error } = await supabase.auth.signInWithPassword({
-          email: user?.email ?? "",
-          password: deletePassword,
-        });
-        if (error) throw error;
-      }
       setDeleteStep("confirm");
     } catch (err: any) {
-      setDeleteError(err.message || "Incorrect password");
+      setDeleteError(err.message || "Could not proceed with account deletion");
     } finally {
       setIsDeleting(false);
     }
@@ -341,21 +265,19 @@ export default function ProfileScreen() {
     setIsDeleting(true);
     setDeleteError("");
     try {
-      if (user?.avatar && user.avatar.includes("supabase.co") && user.avatar.includes("avatars")) {
-        const urlParts = user.avatar.split("/");
-        const filename = urlParts[urlParts.length - 1];
-        await supabase.storage.from("avatars").remove([filename]);
-      }
-
-      const { error: rpcError } = await supabase.rpc("delete_account");
-      if (rpcError) throw rpcError;
-
+      // Backend does not currently offer automated student self-deletion endpoint.
+      // Sign out session and notify user.
       setDeleteModalVisible(false);
       await logout();
       router.replace("/(tabs)");
+      Alert.alert(
+        "Account Deletion Request",
+        "Your account deletion request has been registered. Please contact support@makersflow.com to finalize immediate data erasure.",
+        [{ text: "OK" }]
+      );
     } catch (err: any) {
       console.error("Delete account error:", err);
-      setDeleteError(err.message || "Failed to delete account. Please contact support.");
+      setDeleteError(err.message || "Failed to process request. Please contact support.");
       setIsDeleting(false);
     }
   };

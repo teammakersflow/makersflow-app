@@ -63,6 +63,8 @@ export interface Product {
   badge?: string;
   features: string[];
   weight_kg?: number; // product weight in kg for Shiprocket shipping calculation
+  gst_rate?: number;
+  course_id?: number;
 }
 
 export interface NewsItem {

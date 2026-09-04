@@ -55,15 +55,24 @@ export const ProductCard = React.memo(function ProductCard({ product, onAddedToC
     requireAuth(async () => {
       await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
       const wasWishlisted = isWishlisted;
-      await toggleWishlistProduct(product.id);
-      const message = wasWishlisted
-        ? `${product.title} removed from wishlist`
-        : `${product.title} added to wishlist`;
-      if (Platform.OS === 'android') {
-        const { ToastAndroid } = require('react-native');
-        ToastAndroid.show(message, ToastAndroid.SHORT);
-      } else {
-        Alert.alert('', message);
+      try {
+        await toggleWishlistProduct(product.id);
+        const message = wasWishlisted
+          ? `${product.title} removed from wishlist`
+          : `${product.title} added to wishlist`;
+        if (Platform.OS === 'android') {
+          const { ToastAndroid } = require('react-native');
+          ToastAndroid.show(message, ToastAndroid.SHORT);
+        } else {
+          Alert.alert('', message);
+        }
+      } catch (err: any) {
+        if (Platform.OS === 'android') {
+          const { ToastAndroid } = require('react-native');
+          ToastAndroid.show('Could not update wishlist', ToastAndroid.SHORT);
+        } else {
+          Alert.alert('Wishlist', 'Could not update wishlist. Please try again.');
+        }
       }
     });
   };

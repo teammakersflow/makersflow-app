@@ -6,9 +6,10 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { useColors } from "@/hooks/useColors";
 import { useCart } from "@/context/CartContext";
-import { useAuth } from "@/context/AuthContextSupabase";
+import { useAuth } from "@/context/AuthContext";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { supabase } from "@/lib/supabase";
+import { notificationService } from "@/services/notificationService";
+import { announcementService } from "@/services/announcementService";
 
 function TabLayout() {
   const colors = useColors();
@@ -29,20 +30,14 @@ function TabLayout() {
     async function checkNotifications() {
       try {
         const lastSeen = await AsyncStorage.getItem('announcements_last_seen');
-        const [personal, broadcast] = await Promise.all([
-          supabase
-            .from('notifications')
-            .select('id', { count: 'exact', head: true })
-            .eq('user_id', userId)
-            .eq('is_read', false),
-          supabase
-            .from('announcements')
-            .select('id', { count: 'exact', head: true })
-            .eq('status', 'published')
-            .gt('created_at', lastSeen ?? '1970-01-01'),
+        const [unreadCount, broadcast] = await Promise.all([
+          notificationService.getUnreadCount().catch(() => 0),
+          announcementService.getActiveAnnouncements().catch(() => []),
         ]);
-        const total = (personal.count ?? 0) + (broadcast.count ?? 0);
-        setHasUnread(total > 0);
+        const unreadBroadcasts = broadcast.filter(
+          (a: any) => !lastSeen || new Date(a.created_at) > new Date(lastSeen),
+        ).length;
+        setHasUnread(unreadCount + unreadBroadcasts > 0);
       } catch {
         setHasUnread(false);
       }

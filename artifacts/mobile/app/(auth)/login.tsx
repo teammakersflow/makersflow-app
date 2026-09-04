@@ -17,9 +17,8 @@ import {
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { useAuth } from "@/context/AuthContextSupabase";
+import { useAuth } from "@/context/AuthContext";
 import { useColors } from "@/hooks/useColors";
-import { supabase } from "@/lib/supabase";
 
 function getFriendlyErrorMessage(err: string): string {
   const msg = err.toLowerCase();
@@ -126,18 +125,8 @@ export default function LoginScreen() {
         router.replace("/(auth)/onboarding");
       }
     } else {
-      // Check if account exists in database to distinguish No Account vs Wrong Password
-      let accountExists = true;
-      try {
-        const { data: existingProfile } = await supabase
-          .from("profiles")
-          .select("id")
-          .eq("email", email.trim().toLowerCase())
-          .maybeSingle();
-        accountExists = Boolean(existingProfile);
-      } catch {
-        accountExists = true;
-      }
+      const rawError = (result.error || "").toLowerCase();
+      const accountExists = !rawError.includes("not found") && !rawError.includes("no account") && !rawError.includes("no user");
 
       if (!accountExists) {
         Alert.alert(

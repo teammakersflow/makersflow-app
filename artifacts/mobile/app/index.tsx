@@ -1,7 +1,7 @@
 import { router } from "expo-router";
 import React, { useEffect, useRef, useState } from "react";
 import { ActivityIndicator, StyleSheet, View, Text } from "react-native";
-import { useAuth } from "@/context/AuthContextSupabase";
+import { useAuth } from "@/context/AuthContext";
 import { useColors } from "@/hooks/useColors";
 import { useNetwork } from "@/context/NetworkContext";
 import { hasSeenOnboarding } from "@/lib/onboardingStorage";

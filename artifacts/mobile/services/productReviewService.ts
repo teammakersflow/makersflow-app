@@ -1,4 +1,4 @@
-import { supabase } from "@/lib/supabase";
+import { apiClient } from "@/lib/auth/apiClient";
 
 export interface ProductReview {
   id: string;
@@ -8,53 +8,81 @@ export interface ProductReview {
   comment: string | null;
   status?: "pending" | "approved" | "rejected";
   created_at: string;
+  user?: {
+    id: string;
+    email?: string | null;
+  } | null;
 }
 
-/** Fetch all reviews for a product, newest first */
+export interface ProductRatingItem {
+  product_id: number;
+  rating: number;
+}
+
+/**
+ * Fetch all reviews for a product, newest first via GET /reviews/product/:productId
+ */
 export async function fetchProductReviews(productId: string | number): Promise<ProductReview[]> {
-  const { data, error } = await supabase
-    .from("product_reviews")
-    .select("id, user_id, product_id, rating, comment, status, created_at")
-    .eq("product_id", Number(productId))
-    .order("created_at", { ascending: false });
-  if (error) throw error;
-  return data ?? [];
+  try {
+    const res = await apiClient.get<any>(`/reviews/product/${productId}`);
+    const data = res?.data || res;
+    return Array.isArray(data) ? data : [];
+  } catch (error) {
+    console.error(`[ProductReviewService] fetchProductReviews error for ${productId}:`, error);
+    return [];
+  }
 }
 
-/** Fetch the current user's review for a product (or null) */
+/**
+ * Fetch the current student's review for a product (or null) via GET /reviews/product/:productId/my.
+ * Student identity is derived exclusively from JWT.
+ */
 export async function fetchMyProductReview(
-  userId: string,
-  productId: string | number
+  _userId?: string,
+  productId?: string | number,
 ): Promise<ProductReview | null> {
-  const { data, error } = await supabase
-    .from("product_reviews")
-    .select("id, user_id, product_id, rating, comment, status, created_at")
-    .eq("user_id", userId)
-    .eq("product_id", Number(productId))
-    .maybeSingle();
-  if (error) throw error;
-  return data ?? null;
+  if (!productId) return null;
+  try {
+    const res = await apiClient.get<any>(`/reviews/product/${productId}/my`);
+    const data = res?.data !== undefined ? res.data : res;
+    return data || null;
+  } catch (error) {
+    console.error(`[ProductReviewService] fetchMyProductReview error for ${productId}:`, error);
+    return null;
+  }
 }
 
-/** Insert or update the user's review (one per user per product) */
+/**
+ * Insert or update current student's review for a product via POST /reviews/product/:productId.
+ * Student identity is derived exclusively from JWT.
+ */
 export async function upsertProductReview(
-  userId: string,
+  _userId: string | undefined,
   productId: string | number,
   rating: number,
-  comment: string
+  comment: string,
 ): Promise<void> {
-  const { data: existing } = await supabase.from("product_reviews").select("id, status, comment").eq("user_id", userId).maybeSingle();
-  const isEditingApproved = existing?.status === "approved";
-  const payload: Record<string, any> = { user_id: userId, rating, comment: comment.trim() || null, status: "pending" };
-  if (isEditingApproved) payload.approved_comment = existing.comment;
-  const { error } = await supabase.from("product_reviews").upsert(
-    {
-      user_id: userId,
-      product_id: Number(productId),
+  try {
+    await apiClient.post<any>(`/reviews/product/${productId}`, {
       rating,
-      comment: comment.trim() || null,
-    },
-    { onConflict: "user_id,product_id" }
-  );
-  if (error) throw error;
+      comment: comment?.trim() || undefined,
+    });
+  } catch (error) {
+    console.error(`[ProductReviewService] upsertProductReview error for ${productId}:`, error);
+    throw error;
+  }
+}
+
+/**
+ * Fetch lightweight product ratings summary via GET /reviews/ratings/products
+ */
+export async function fetchProductRatingsSummary(): Promise<ProductRatingItem[]> {
+  try {
+    const res = await apiClient.get<any>('/reviews/ratings/products');
+    const data = res?.data || res;
+    return Array.isArray(data) ? data : [];
+  } catch (error) {
+    console.error('[ProductReviewService] fetchProductRatingsSummary error:', error);
+    return [];
+  }
 }
