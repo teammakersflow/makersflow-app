@@ -17,6 +17,7 @@ import { LinearGradient } from "expo-linear-gradient";
 import { useAuth } from "@/context/AuthContext";
 import { useColors } from "@/hooks/useColors";
 import { supabase } from "@/lib/supabase";
+import { apiRequest } from "@/lib/auth/apiClient";
 import { getCourseModules } from "@/services/courseDataProvider";
 import { fetchEnrolledCourses } from "@/services/enrollmentService";
 import { fetchCourseProgress } from "@/lib/progressStorage";
@@ -51,47 +52,67 @@ export default function AchievementsScreen() {
         const stored = await AsyncStorage.getItem("viewed_certificates");
         if (stored && isMounted) setViewedCerts(JSON.parse(stored));
 
-        // Fetch completed lesson counts for real ranking metric
-        const { data: progressRows } = await supabase
-          .from("lesson_progress")
-          .select("user_id, is_completed")
-          .eq("is_completed", true);
-
-        const userLessonsMap = new Map<string, number>();
-        (progressRows ?? []).forEach((p: any) => {
-          const uid = String(p.user_id);
-          userLessonsMap.set(uid, (userLessonsMap.get(uid) || 0) + 1);
-        });
-
-        // Fetch user profiles for display names across all registered learners
-        const { data: profiles } = await supabase
-          .from("profiles")
-          .select("id, full_name, avatar_url");
-
-        if (isMounted) {
-          if (profiles && profiles.length > 0) {
-            const mapped = profiles.map((p: any) => {
-              const completedCount = userLessonsMap.get(p.id) || 0;
-              return {
-                id: p.id,
-                name: p.full_name || "MakersFlow Learner",
-                xp: completedCount * 50 + 100, // 100 base XP + 50 per completed lesson
-              };
-            });
-            // Sort strictly descending across ALL learners, then take top 10
-            mapped.sort((a, b) => b.xp - a.xp);
+        // 1. Try backend /leaderboard
+        let backendSuccess = false;
+        try {
+          const lbRes = await apiRequest<any>('/leaderboard');
+          const lbData = lbRes?.data ?? (Array.isArray(lbRes) ? lbRes : []);
+          if (Array.isArray(lbData) && lbData.length > 0 && isMounted) {
+            const mapped = lbData.map((item: any, idx: number) => ({
+              id: item.user_id || String(idx + 1),
+              name: item.name || "MakersFlow Learner",
+              xp: (item.longest_streak ?? 0) * 50 + 100,
+            }));
             setLeaderboard(mapped.slice(0, 10));
-          } else {
-            // Platform learners baseline ordered strictly descending by score
-            const baseline = [
-              { id: "1", name: "Aarav Sharma", xp: 1450 },
-              { id: "2", name: "Priya Patel", xp: 1280 },
-              { id: "3", name: "Rohan Gupta", xp: 1150 },
-              { id: "4", name: user?.name || "You", xp: 890 },
-              { id: "5", name: "Sneha Reddy", xp: 760 },
-            ];
-            baseline.sort((a, b) => b.xp - a.xp);
-            setLeaderboard(baseline);
+            backendSuccess = true;
+          }
+        } catch {
+          // fallback to Supabase
+        }
+
+        if (!backendSuccess) {
+          // Fetch completed lesson counts for real ranking metric
+          const { data: progressRows } = await supabase
+            .from("lesson_progress")
+            .select("user_id, is_completed")
+            .eq("is_completed", true);
+
+          const userLessonsMap = new Map<string, number>();
+          (progressRows ?? []).forEach((p: any) => {
+            const uid = String(p.user_id);
+            userLessonsMap.set(uid, (userLessonsMap.get(uid) || 0) + 1);
+          });
+
+          // Fetch user profiles for display names across all registered learners
+          const { data: profiles } = await supabase
+            .from("profiles")
+            .select("id, full_name, avatar_url");
+
+          if (isMounted) {
+            if (profiles && profiles.length > 0) {
+              const mapped = profiles.map((p: any) => {
+                const completedCount = userLessonsMap.get(p.id) || 0;
+                return {
+                  id: p.id,
+                  name: p.full_name || "MakersFlow Learner",
+                  xp: completedCount * 50 + 100, // 100 base XP + 50 per completed lesson
+                };
+              });
+              // Sort strictly descending across ALL learners, then take top 10
+              mapped.sort((a, b) => b.xp - a.xp);
+              setLeaderboard(mapped.slice(0, 10));
+            } else {
+              // Platform learners baseline ordered strictly descending by score
+              const baseline = [
+                { id: "1", name: "Aarav Sharma", xp: 1450 },
+                { id: "2", name: "Priya Patel", xp: 1280 },
+                { id: "3", name: "Rohan Gupta", xp: 1150 },
+                { id: "4", name: user?.name || "You", xp: 890 },
+                { id: "5", name: "Sneha Reddy", xp: 760 },
+              ];
+              baseline.sort((a, b) => b.xp - a.xp);
+              setLeaderboard(baseline);
+            }
           }
         }
       } catch (err) {

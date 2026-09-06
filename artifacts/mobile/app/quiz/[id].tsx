@@ -17,6 +17,7 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useColors } from "@/hooks/useColors";
 import { supabase } from "@/lib/supabase";
+import { apiRequest } from "@/lib/auth/apiClient";
 import { TEXT_STYLES } from "@/constants/typography";
 
 export default function QuizScreen() {
@@ -45,6 +46,36 @@ export default function QuizScreen() {
       if (!lessonId) return;
       setIsLoading(true);
       try {
+      // 1. Try backend GET /quiz-questions/lesson/:lessonId
+      let loaded = false;
+      try {
+        const res = await apiRequest<any>(`/quiz-questions/lesson/${lessonId}`);
+        const list = res?.data ?? (Array.isArray(res) ? res : null);
+        if (Array.isArray(list) && list.length > 0 && list[0].correct_option_index !== undefined) {
+          const mapped = list.map((q: any) => {
+            let opts = [];
+            try {
+              opts = typeof q.options === 'string' ? JSON.parse(q.options) : q.options;
+            } catch {
+              opts = Array.isArray(q.options) ? q.options : [];
+            }
+            return {
+              id: q.id,
+              question: q.question_text,
+              options: opts,
+              correctIndex: q.correct_option_index,
+              explanation: "Select the correct answer to complete this question.",
+            };
+          });
+          setQuestions(mapped);
+          setTimeLeft(mapped.length * 60 || 600);
+          loaded = true;
+        }
+      } catch {
+        // fallback
+      }
+
+      if (!loaded) {
         const { data, error } = await supabase
           .from('quiz_questions')
           .select('id, question_text, options, correct_option_index, position')
@@ -75,6 +106,7 @@ export default function QuizScreen() {
           setQuestions(mapped);
           setTimeLeft(mapped.length * 60 || 600);
         }
+      }
       } catch (err) {
         console.error('[Quiz] load error:', err);
       } finally {

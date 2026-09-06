@@ -24,6 +24,7 @@ import { useCart } from "@/context/CartContext";
 import { useColors } from "@/hooks/useColors";
 import { useAuth } from "@/context/AuthContext";
 import { supabase } from "@/lib/supabase";
+import { apiRequest } from "@/lib/auth/apiClient";
 import { productService } from "@/services/productService";
 import * as Print from "expo-print";
 import * as FileSystem from "expo-file-system/legacy";
@@ -433,19 +434,38 @@ export default function CheckoutScreen() {
   // ── Load addresses ──
   async function loadAddresses(keepSelectedId?: string) {
     if (!user?.id) return;
-    const { data, error } = await supabase
-      .from("shipping_addresses")
-      .select("*")
-      .eq("user_id", user.id)
-      .order("is_default", { ascending: false });
 
-    if (error || !data) return;
-    setAddresses(data);
+    // 1. Try backend /shipping-addresses
+    let loadedData: any[] | null = null;
+    try {
+      const res = await apiRequest<any>('/shipping-addresses');
+      const list = res?.data ?? (Array.isArray(res) ? res : null);
+      if (Array.isArray(list)) {
+        loadedData = list;
+      }
+    } catch {
+      // Fallback to Supabase below
+    }
+
+    if (!loadedData) {
+      const { data, error } = await supabase
+        .from("shipping_addresses")
+        .select("*")
+        .eq("user_id", user.id)
+        .order("is_default", { ascending: false });
+
+      if (!error && data) {
+        loadedData = data;
+      }
+    }
+
+    if (!loadedData) return;
+    setAddresses(loadedData);
 
     // FIX: if we have a keepSelectedId and it exists, keep it selected
     // Otherwise pick default/first — but DON'T auto-select if user has explicitly deselected
     if (keepSelectedId) {
-      const exists = data.some((a) => String(a.id) === String(keepSelectedId));
+      const exists = loadedData.some((a) => String(a.id) === String(keepSelectedId));
       if (exists) {
         setSelectedAddressId(String(keepSelectedId));
         return;
@@ -455,7 +475,7 @@ export default function CheckoutScreen() {
     // FIX: Only auto-select on first load (when selectedAddressId is null).
     // After first load, preserve whatever user chose.
     if (selectedAddressId === null) {
-      const def = data.find((a) => a.is_default) ?? data[0];
+      const def = loadedData.find((a) => a.is_default) ?? loadedData[0];
       if (def) {
         setSelectedAddressId(String(def.id));
         setName(def.full_name ?? name);
@@ -499,15 +519,48 @@ export default function CheckoutScreen() {
     }
     if (!user?.id) return;
 
-    const addressData = {
-      user_id: user.id,
+    const addressPayload = {
       full_name: formFullName.trim(),
       address_line1: formAddressLine1.trim(),
-      address_line2: formAddressLine2.trim() || null,
+      address_line2: formAddressLine2.trim() || undefined,
       city: formCity.trim(),
       state: formState.trim(),
       postal_code: formPostalCode.trim(),
       phone: formPhone.trim().replace(/^\+91/, ""),
+    };
+
+    // 1. Try backend /shipping-addresses
+    try {
+      if (editingAddressId) {
+        await apiRequest(`/shipping-addresses/${editingAddressId}`, {
+          method: "PATCH",
+          body: JSON.stringify(addressPayload),
+        });
+        setShowAddressForm(false);
+        resetAddressForm();
+        await loadAddresses(selectedAddressId ?? undefined);
+        return;
+      } else {
+        const isFirst = addresses.length === 0;
+        const res = await apiRequest<any>("/shipping-addresses", {
+          method: "POST",
+          body: JSON.stringify({ ...addressPayload, is_default: isFirst }),
+        });
+        const inserted = res?.data ?? res;
+        setShowAddressForm(false);
+        resetAddressForm();
+        const newId = inserted?.id ? String(inserted.id) : null;
+        await loadAddresses(newId ?? undefined);
+        return;
+      }
+    } catch {
+      // Fallback to Supabase
+    }
+
+    const addressData = {
+      user_id: user.id,
+      ...addressPayload,
+      address_line2: formAddressLine2.trim() || null,
     };
 
     if (editingAddressId) {
@@ -542,20 +595,23 @@ export default function CheckoutScreen() {
         {
           text: "Delete", style: "destructive",
           onPress: async () => {
-            const { error } = await supabase.from("shipping_addresses").delete().eq("id", addr.id);
-            if (error) { Alert.alert("Error", error.message); return; }
+            let backendDeleted = false;
+            try {
+              await apiRequest(`/shipping-addresses/${addr.id}`, { method: "DELETE" });
+              backendDeleted = true;
+            } catch {
+              // fallback below
+            }
+            if (!backendDeleted) {
+              const { error } = await supabase.from("shipping_addresses").delete().eq("id", addr.id);
+              if (error) { Alert.alert("Error", error.message); return; }
+            }
             // FIX: if deleted address was selected, clear selection so user must pick again
             if (String(selectedAddressId) === String(addr.id)) {
               setSelectedAddressId(null);
               setShiprocketRate(null);
             }
-            // Reload without auto-selecting
-            const { data } = await supabase
-              .from("shipping_addresses")
-              .select("*")
-              .eq("user_id", user!.id)
-              .order("is_default", { ascending: false });
-            setAddresses(data ?? []);
+            await loadAddresses(undefined);
           },
         },
       ]
@@ -568,7 +624,37 @@ export default function CheckoutScreen() {
     if (!code) return;
     setPromoError("");
     setPromoLoading(true);
+
     try {
+      // 1. Try backend /coupons/validate
+      try {
+        const res = await apiRequest<any>("/coupons/validate", {
+          method: "POST",
+          body: JSON.stringify({
+            code,
+            order_amount: total,
+            product_ids: items.map((i) => String(i.product.id)),
+          }),
+        });
+        const resData = res?.data ?? res;
+        if (resData?.valid) {
+          setAppliedPromo({
+            code: resData.code || code,
+            discount: Number(resData.discount_amount ?? 0),
+            label: `${resData.code || code} applied`,
+            id: resData.coupon_id,
+          });
+          await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+          return;
+        }
+      } catch (backendErr: any) {
+        if (backendErr?.status && backendErr.status >= 400 && backendErr.status < 500) {
+          setPromoError(backendErr.message || "Invalid coupon code.");
+          return;
+        }
+      }
+
+      // 2. Fallback to Supabase validate-coupon
       const { data, error } = await supabase.functions.invoke("validate-coupon", {
         body: {
           code,

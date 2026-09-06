@@ -3,6 +3,7 @@ import * as Application from "expo-application";
 import Constants from "expo-constants";
 import { Platform } from "react-native";
 import { supabase } from "@/lib/supabase";
+import { apiRequest } from "@/lib/auth/apiClient";
 
 const devLog = (...args: any[]) => {
   if (__DEV__) console.log(...args);
@@ -105,26 +106,38 @@ export async function registerForPushNotifications(userId: string): Promise<stri
       .filter(Boolean)
       .join(" | ");
 
-    // ── FIX ──────────────────────────────────────────────────────────────
-    // This used onConflict: "token", but the table is declared
-    // UNIQUE(user_id, token). Postgres rejects a conflict target that has no
-    // matching unique index ("no unique or exclusion constraint matching the
-    // ON CONFLICT specification"), so the upsert failed every time and no push
-    // token was ever stored — which is why push notifications never arrived.
-    // The migration adds a UNIQUE index on token alone; this matches it.
-    const { error } = await supabase.from("push_tokens").upsert(
-      {
-        user_id: userId,
-        token,
-        device_info: deviceInfo,
-        platform: Platform.OS,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: "token" }
-    );
-    if (error) {
-      devLog("[Push] Failed to persist token:", error.message);
-      return token;
+    // 1. Try backend POST /push-tokens
+    let backendSuccess = false;
+    try {
+      await apiRequest("/push-tokens", {
+        method: "POST",
+        body: JSON.stringify({
+          token,
+          platform: Platform.OS,
+          device_info: deviceInfo,
+        }),
+      });
+      backendSuccess = true;
+      devLog("[Push] Registered push token with backend");
+    } catch (backendErr: any) {
+      devLog("[Push] Backend push token registration failed, trying Supabase:", backendErr?.message || backendErr);
+    }
+
+    if (!backendSuccess) {
+      const { error } = await supabase.from("push_tokens").upsert(
+        {
+          user_id: userId,
+          token,
+          device_info: deviceInfo,
+          platform: Platform.OS,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "token" }
+      );
+      if (error) {
+        devLog("[Push] Failed to persist token:", error.message);
+        return token;
+      }
     }
 
     devLog("[Push] Registered push token");
@@ -149,11 +162,24 @@ export async function unregisterPushToken(userId: string): Promise<void> {
     const tokenResponse = await Notifications.getExpoPushTokenAsync(
       projectId ? { projectId } : undefined
     );
+    const token = tokenResponse.data;
+
+    try {
+      const res = await apiRequest<any>("/push-tokens");
+      const tokens = res?.data ?? (Array.isArray(res) ? res : []);
+      const matched = tokens.find((t: any) => t.token === token);
+      if (matched?.id) {
+        await apiRequest(`/push-tokens/${matched.id}`, { method: "DELETE" });
+      }
+    } catch {
+      // ignore
+    }
+
     await supabase
       .from("push_tokens")
       .delete()
       .eq("user_id", userId)
-      .eq("token", tokenResponse.data);
+      .eq("token", token);
   } catch {
     // best-effort cleanup
   }

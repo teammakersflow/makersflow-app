@@ -31,6 +31,7 @@ import { useProgress } from "@/context/ProgressContext";
 import { getCourseById, getCourseModules } from "@/services/courseDataProvider";
 import { markLessonComplete, upsertLessonProgress, fetchCourseLessonsProgress } from "@/lib/progressStorage";
 import { supabase } from "@/lib/supabase";
+import { apiRequest } from "@/lib/auth/apiClient";
 import { getEnrollment, isExpired, completeCourse } from "@/services/enrollmentService";
 import { onSessionExpired } from "@/lib/sessionEvents";
 import { ActivityIndicator } from "react-native";
@@ -97,25 +98,61 @@ export default function LearnScreen() {
   const [lessonNotes, setLessonNotes] = useState<string[]>([]);
   
   useEffect(() => {
-    if (!activeModuleId) { setLessonResources([]); return; }
+    if (!activeModuleId) { setLessonResources([]); setLessonNotes([]); return; }
     (async () => {
+      // 1. Fetch lesson resources (backend first, then Supabase fallback)
       try {
-        const { data } = await supabase
-          .from("lesson_resources")
-          .select("id, title, url, type")
-          .eq("lesson_id", Number(activeModuleId))
-          .order("created_at", { ascending: true });
-        setLessonResources((data as any[]) ?? []);
+        let resLoaded = false;
+        try {
+          const res = await apiRequest<any>(`/lesson-resources/lesson/${activeModuleId}`);
+          const list = res?.data ?? (Array.isArray(res) ? res : null);
+          if (Array.isArray(list)) {
+            setLessonResources(list.map((r: any) => ({
+              id: String(r.id),
+              title: r.title,
+              url: r.url,
+              type: r.type ?? null,
+            })));
+            resLoaded = true;
+          }
+        } catch {
+          // fallback
+        }
+
+        if (!resLoaded) {
+          const { data } = await supabase
+            .from("lesson_resources")
+            .select("id, title, url, type")
+            .eq("lesson_id", Number(activeModuleId))
+            .order("created_at", { ascending: true });
+          setLessonResources((data as any[]) ?? []);
+        }
       } catch {
         setLessonResources([]);
       }
+
+      // 2. Fetch lesson notes (backend first, then Supabase fallback)
       try {
-        const { data } = await supabase
-          .from("lesson_notes")
-          .select("content, position")
-          .eq("lesson_id", Number(activeModuleId))
-          .order("position", { ascending: true });
-        setLessonNotes(((data as any[]) ?? []).map((n) => n.content));
+        let notesLoaded = false;
+        try {
+          const res = await apiRequest<any>(`/lesson-notes/lesson/${activeModuleId}`);
+          const list = res?.data ?? (Array.isArray(res) ? res : null);
+          if (Array.isArray(list)) {
+            setLessonNotes(list.map((n: any) => n.content));
+            notesLoaded = true;
+          }
+        } catch {
+          // fallback
+        }
+
+        if (!notesLoaded) {
+          const { data } = await supabase
+            .from("lesson_notes")
+            .select("content, position")
+            .eq("lesson_id", Number(activeModuleId))
+            .order("position", { ascending: true });
+          setLessonNotes(((data as any[]) ?? []).map((n) => n.content));
+        }
       } catch {
         setLessonNotes([]);
       }
