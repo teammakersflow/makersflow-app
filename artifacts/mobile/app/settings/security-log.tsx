@@ -6,6 +6,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useColors } from '@/hooks/useColors';
 import { useAuth } from '@/context/AuthContext';
 import { supabase } from '@/lib/supabase';
+import { apiRequest } from '@/lib/auth/apiClient';
 
 export default function SecurityLogScreen() {
   const colors = useColors();
@@ -16,13 +17,35 @@ export default function SecurityLogScreen() {
 
   const loadLogs = async () => {
     if (!user?.id) { setIsLoading(false); return; }
-    const { data } = await supabase
-      .from('login_events')
-      .select('id, device_info, created_at, is_flagged')
-      .eq('user_id', user.id)
-      .order('created_at', { ascending: false })
-      .limit(50);
-    setEvents(data ?? []);
+    let logs: any[] | null = null;
+
+    try {
+      const res = await apiRequest<any>('/users/me/security-logs', { method: 'GET' });
+      const raw = res?.data !== undefined ? res.data : res;
+      if (Array.isArray(raw)) {
+        logs = raw;
+      }
+    } catch (err: any) {
+      console.warn('[LoginActivity] NestJS load failed, attempting Supabase fallback:', err?.message || err);
+    }
+
+    if (!logs) {
+      try {
+        const { data, error } = await supabase
+          .from('login_events')
+          .select('id, device_info, created_at, is_flagged')
+          .eq('user_id', user.id)
+          .order('created_at', { ascending: false })
+          .limit(50);
+        if (!error && data) {
+          logs = data;
+        }
+      } catch (fallbackErr) {
+        console.error('[LoginActivity] Supabase fallback error:', fallbackErr);
+      }
+    }
+
+    setEvents(logs ?? []);
     setIsLoading(false);
   };
 
@@ -30,7 +53,7 @@ export default function SecurityLogScreen() {
     loadLogs();
   }, [user?.id]);
 
-  const handleDeleteEvent = (eventId: number) => {
+  const handleDeleteEvent = (eventId: string | number) => {
     Alert.alert(
       "Delete Activity Log",
       "Are you sure you want to delete this login event log?",
@@ -41,12 +64,25 @@ export default function SecurityLogScreen() {
           style: "destructive",
           onPress: async () => {
             try {
-              const { error } = await supabase
-                .from('login_events')
-                .delete()
-                .eq('id', eventId);
-              if (error) throw error;
-              setEvents((prev) => prev.filter((ev) => ev.id !== eventId));
+              let deletedOnBackend = false;
+              try {
+                await apiRequest(`/users/me/security-logs/${eventId}`, {
+                  method: 'DELETE',
+                });
+                deletedOnBackend = true;
+              } catch (backendErr: any) {
+                console.warn('[LoginActivity] NestJS delete failed, attempting Supabase fallback:', backendErr?.message || backendErr);
+              }
+
+              if (!deletedOnBackend) {
+                const { error } = await supabase
+                  .from('login_events')
+                  .delete()
+                  .eq('id', eventId);
+                if (error) throw error;
+              }
+
+              setEvents((prev) => prev.filter((ev) => String(ev.id) !== String(eventId)));
             } catch (err) {
               console.error('[LoginActivity] Delete error:', err);
               Alert.alert("Error", "Failed to delete login event log.");
@@ -69,11 +105,31 @@ export default function SecurityLogScreen() {
           style: "destructive",
           onPress: async () => {
             try {
-              const { error } = await supabase
-                .from('login_events')
-                .delete()
-                .eq('user_id', user.id);
-              if (error) throw error;
+              let cleared = false;
+              if (events.length > 0) {
+                try {
+                  const results = await Promise.allSettled(
+                    events.map((ev) =>
+                      apiRequest(`/users/me/security-logs/${ev.id}`, { method: 'DELETE' })
+                    )
+                  );
+                  const anySuccess = results.some((r) => r.status === 'fulfilled');
+                  if (anySuccess) {
+                    cleared = true;
+                  }
+                } catch (batchErr: any) {
+                  console.warn('[LoginActivity] NestJS clear all failed:', batchErr?.message || batchErr);
+                }
+              }
+
+              if (!cleared) {
+                const { error } = await supabase
+                  .from('login_events')
+                  .delete()
+                  .eq('user_id', user.id);
+                if (error) throw error;
+              }
+
               setEvents([]);
             } catch (err) {
               console.error('[LoginActivity] Clear all error:', err);
