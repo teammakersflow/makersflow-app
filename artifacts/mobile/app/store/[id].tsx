@@ -31,6 +31,8 @@ import { StarRating } from "@/components/StarRating";
 import { ImageGallery } from "@/components/ImageGallery";
 import { parseThumbnailUrls } from "@/lib/thumbnailUtils";
 import { useAuth } from "@/context/AuthContext";
+import { orderService } from "@/services/orderService";
+import { ApiError } from "@/lib/auth/apiClient";
 import {
   fetchProductReviews,
   fetchMyProductReview,
@@ -38,6 +40,14 @@ import {
   type ProductReview,
 } from "@/services/productReviewService";
 import { ActivityIndicator, TextInput } from "react-native";
+
+function isNetworkOrUnavailable(err: any): boolean {
+  if (!err) return false;
+  if (err instanceof ApiError) {
+    return err.status === 0 || err.status === 408 || err.status === 502 || err.status === 503 || err.status === 504;
+  }
+  return err.name === 'AbortError' || (typeof err.message === 'string' && err.message.toLowerCase().includes('network'));
+}
 
 const productFallbacks: Record<string, any[]> = {
   physical: [
@@ -297,7 +307,23 @@ export default function ProductDetailScreen() {
         : Promise.resolve(null);
 
       const ordersPromise = user?.id
-        ? supabase.from("orders").select("items").eq("user_id", user.id).in("status", ["paid", "completed"])
+        ? (async () => {
+            try {
+              const myOrders = await orderService.getMyOrders();
+              return { data: myOrders, error: null };
+            } catch (err: any) {
+              if (isNetworkOrUnavailable(err)) {
+                console.warn('[ProductDetail] NestJS orders unavailable, attempting Supabase fallback:', err?.message || err);
+                return supabase
+                  .from("orders")
+                  .select("items, status")
+                  .eq("user_id", user.id)
+                  .in("status", ["paid", "completed"]);
+              }
+              console.error('[ProductDetail] NestJS /orders/my error (not masked):', err);
+              return { data: null, error: err };
+            }
+          })()
         : Promise.resolve({ data: null, error: null });
 
       Promise.allSettled([mediaPromise, reviewsPromise, myReviewPromise, ordersPromise]).then(
@@ -337,6 +363,9 @@ export default function ProductDetailScreen() {
           if (ordersRes.status === 'fulfilled' && (ordersRes.value as any)?.data) {
             const userOrders = (ordersRes.value as any).data;
             const bought = userOrders.some((order: any) => {
+              if (order.status && !["paid", "completed", "delivered"].includes(order.status)) {
+                return false;
+              }
               let itemsList: any[] = [];
               try {
                 itemsList = typeof order.items === "string" ? JSON.parse(order.items) : order.items;

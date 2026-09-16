@@ -69,16 +69,21 @@ export const tokenStorage = {
       if (Platform.OS === 'web') {
         localStorage.removeItem(ACCESS_TOKEN_KEY);
         localStorage.removeItem(REFRESH_TOKEN_KEY);
+        localStorage.removeItem('makersflow.auth');
         return;
       }
-      await SecureStore.deleteItemAsync(ACCESS_TOKEN_KEY);
-      await SecureStore.deleteItemAsync(REFRESH_TOKEN_KEY);
-      await AsyncStorage.removeItem(ACCESS_TOKEN_KEY);
-      await AsyncStorage.removeItem(REFRESH_TOKEN_KEY);
+      await SecureStore.deleteItemAsync(ACCESS_TOKEN_KEY).catch(() => {});
+      await SecureStore.deleteItemAsync(REFRESH_TOKEN_KEY).catch(() => {});
+      await SecureStore.deleteItemAsync('supabase.auth.token').catch(() => {});
+      await SecureStore.deleteItemAsync('makersflow.auth').catch(() => {});
+      await AsyncStorage.removeItem(ACCESS_TOKEN_KEY).catch(() => {});
+      await AsyncStorage.removeItem(REFRESH_TOKEN_KEY).catch(() => {});
+      await AsyncStorage.removeItem('supabase.auth.token').catch(() => {});
+      await AsyncStorage.removeItem('makersflow.auth').catch(() => {});
     } catch {
       try {
-        await AsyncStorage.removeItem(ACCESS_TOKEN_KEY);
-        await AsyncStorage.removeItem(REFRESH_TOKEN_KEY);
+        await AsyncStorage.removeItem(ACCESS_TOKEN_KEY).catch(() => {});
+        await AsyncStorage.removeItem(REFRESH_TOKEN_KEY).catch(() => {});
       } catch {
         // ignore
       }

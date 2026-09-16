@@ -16,7 +16,6 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAuth } from "@/context/AuthContext";
 import { useColors } from "@/hooks/useColors";
-import { supabase } from "@/lib/supabase";
 import { apiRequest } from "@/lib/auth/apiClient";
 
 export default function FeedbackScreen() {
@@ -50,7 +49,6 @@ export default function FeedbackScreen() {
     setLoading(true);
     await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 
-    let backendSuccess = false;
     try {
       await apiRequest("/feedback", {
         method: "POST",
@@ -59,29 +57,13 @@ export default function FeedbackScreen() {
           message: message.trim() || undefined,
         }),
       });
-      backendSuccess = true;
+      setLoading(false);
+      await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      setSubmitted(true);
     } catch (err: any) {
-      console.warn("[Feedback] Backend submission failed, trying Supabase fallback:", err?.message || err);
+      setLoading(false);
+      setError(err?.message || "Failed to submit feedback. Please try again.");
     }
-
-    if (!backendSuccess) {
-      const { error: dbError } = await supabase.from("feedback").insert({
-        user_id: user.id,
-        rating,
-        message: message.trim() || null,
-      });
-
-      if (dbError) {
-        setLoading(false);
-        setError("Failed to submit feedback. Please try again.");
-        return;
-      }
-    }
-
-    setLoading(false);
-
-    await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    setSubmitted(true);
   }
 
   if (submitted) {

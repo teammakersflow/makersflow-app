@@ -6,7 +6,15 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useColors } from '@/hooks/useColors';
 import { useAuth } from '@/context/AuthContext';
 import { supabase } from '@/lib/supabase';
-import { apiRequest } from '@/lib/auth/apiClient';
+import { apiRequest, ApiError } from '@/lib/auth/apiClient';
+
+function isNetworkOrUnavailable(err: any): boolean {
+  if (!err) return false;
+  if (err instanceof ApiError) {
+    return err.status === 0 || err.status === 408 || err.status === 502 || err.status === 503 || err.status === 504;
+  }
+  return err.name === 'AbortError' || (typeof err.message === 'string' && err.message.toLowerCase().includes('network'));
+}
 
 export default function SecurityLogScreen() {
   const colors = useColors();
@@ -17,35 +25,38 @@ export default function SecurityLogScreen() {
 
   const loadLogs = async () => {
     if (!user?.id) { setIsLoading(false); return; }
-    let logs: any[] | null = null;
 
     try {
       const res = await apiRequest<any>('/users/me/security-logs', { method: 'GET' });
       const raw = res?.data !== undefined ? res.data : res;
       if (Array.isArray(raw)) {
-        logs = raw;
+        setEvents(raw);
+        setIsLoading(false);
+        return;
       }
     } catch (err: any) {
-      console.warn('[LoginActivity] NestJS load failed, attempting Supabase fallback:', err?.message || err);
-    }
-
-    if (!logs) {
-      try {
-        const { data, error } = await supabase
-          .from('login_events')
-          .select('id, device_info, created_at, is_flagged')
-          .eq('user_id', user.id)
-          .order('created_at', { ascending: false })
-          .limit(50);
-        if (!error && data) {
-          logs = data;
-        }
-      } catch (fallbackErr) {
-        console.error('[LoginActivity] Supabase fallback error:', fallbackErr);
+      if (!isNetworkOrUnavailable(err)) {
+        console.error('[LoginActivity] NestJS API error (not masked):', err);
+        setIsLoading(false);
+        return;
       }
+      console.warn('[LoginActivity] NestJS unavailable, attempting Supabase fallback:', err?.message || err);
     }
 
-    setEvents(logs ?? []);
+    try {
+      const { data, error } = await supabase
+        .from('login_events')
+        .select('id, device_info, created_at, is_flagged')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false })
+        .limit(50);
+      if (!error && data) {
+        setEvents(data);
+      }
+    } catch (fallbackErr) {
+      console.error('[LoginActivity] Supabase fallback error:', fallbackErr);
+    }
+
     setIsLoading(false);
   };
 
@@ -71,7 +82,11 @@ export default function SecurityLogScreen() {
                 });
                 deletedOnBackend = true;
               } catch (backendErr: any) {
-                console.warn('[LoginActivity] NestJS delete failed, attempting Supabase fallback:', backendErr?.message || backendErr);
+                if (!isNetworkOrUnavailable(backendErr)) {
+                  // Real backend API error (401, 403, 404, etc.) - do NOT mask with fallback
+                  throw backendErr;
+                }
+                console.warn('[LoginActivity] NestJS delete unavailable, attempting Supabase fallback:', backendErr?.message || backendErr);
               }
 
               if (!deletedOnBackend) {
@@ -83,9 +98,9 @@ export default function SecurityLogScreen() {
               }
 
               setEvents((prev) => prev.filter((ev) => String(ev.id) !== String(eventId)));
-            } catch (err) {
+            } catch (err: any) {
               console.error('[LoginActivity] Delete error:', err);
-              Alert.alert("Error", "Failed to delete login event log.");
+              Alert.alert("Error", err?.message || "Failed to delete login event log.");
             }
           }
         }
@@ -113,12 +128,20 @@ export default function SecurityLogScreen() {
                       apiRequest(`/users/me/security-logs/${ev.id}`, { method: 'DELETE' })
                     )
                   );
+                  const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+                  const realApiErr = rejected.find((r) => !isNetworkOrUnavailable(r.reason));
+                  if (realApiErr) {
+                    throw realApiErr.reason;
+                  }
                   const anySuccess = results.some((r) => r.status === 'fulfilled');
                   if (anySuccess) {
                     cleared = true;
                   }
                 } catch (batchErr: any) {
-                  console.warn('[LoginActivity] NestJS clear all failed:', batchErr?.message || batchErr);
+                  if (!isNetworkOrUnavailable(batchErr)) {
+                    throw batchErr;
+                  }
+                  console.warn('[LoginActivity] NestJS clear all failed with network issue:', batchErr?.message || batchErr);
                 }
               }
 
@@ -131,9 +154,9 @@ export default function SecurityLogScreen() {
               }
 
               setEvents([]);
-            } catch (err) {
+            } catch (err: any) {
               console.error('[LoginActivity] Clear all error:', err);
-              Alert.alert("Error", "Failed to clear login logs.");
+              Alert.alert("Error", err?.message || "Failed to clear login logs.");
             }
           }
         }

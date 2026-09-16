@@ -5,6 +5,7 @@ import * as Sharing from 'expo-sharing';
 import * as FileSystem from 'expo-file-system/legacy';
 import { Asset } from 'expo-asset';
 import { TEXT_STYLES } from '@/constants/typography';
+import { issueCertificate, fetchMyCertificates } from '@/services/certificateService';
 import React, { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -25,19 +26,6 @@ const RNWebView = WebView as unknown as React.ComponentType<
 
 const TRANSPARENT_1X1_PNG =
   'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
-
-function generateCertId(studentName: string, courseName: string, dateStr: string): string {
-  const d = dateStr ? new Date(dateStr) : new Date();
-  const year = isNaN(d.getTime()) ? new Date().getFullYear() : d.getFullYear();
-  let hash = 0;
-  const str = `${studentName}:${courseName}:${dateStr}`;
-  for (let i = 0; i < str.length; i++) {
-    hash = (hash << 5) - hash + str.charCodeAt(i);
-    hash |= 0;
-  }
-  const positiveHash = Math.abs(hash).toString(16).padStart(6, '0').toUpperCase().slice(0, 6);
-  return `MF-CERT-${year}-${positiveHash}`;
-}
 
 function getCertificateHtml(
   studentName: string,
@@ -368,6 +356,8 @@ export default function CertificateScreen() {
     autoDownload,
     level,
     instructor,
+    courseId,
+    certNumber,
   } = useLocalSearchParams<{
     courseName: string;
     studentName: string;
@@ -376,40 +366,18 @@ export default function CertificateScreen() {
     autoDownload?: string;
     level?: string;
     instructor?: string;
+    courseId?: string;
+    certNumber?: string;
   }>();
 
   const [htmlContent, setHtmlContent] = useState<string | null>(null);
   const [isLoadingHtml, setIsLoadingHtml] = useState(true);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [certificateError, setCertificateError] = useState<string | null>(null);
   const autoDownloadTriggered = useRef(false);
-
-  let displayDate = 'N/A';
-  try {
-    const d = completionDate ? new Date(completionDate) : new Date();
-    if (!isNaN(d.getTime())) {
-      displayDate = d.toLocaleDateString('en-IN', {
-        day: 'numeric',
-        month: 'long',
-        year: 'numeric',
-      });
-    } else {
-      displayDate = new Date().toLocaleDateString('en-IN', {
-        day: 'numeric',
-        month: 'long',
-        year: 'numeric',
-      });
-    }
-  } catch (err) {
-    displayDate = new Date().toLocaleDateString('en-IN', {
-      day: 'numeric',
-      month: 'long',
-      year: 'numeric',
-    });
-  }
 
   const student = studentName || 'Student';
   const course = courseName || 'Course';
-  const certId = generateCertId(student, course, completionDate || '');
 
   useEffect(() => {
     let isMounted = true;
@@ -417,6 +385,50 @@ export default function CertificateScreen() {
       let flowLogoBase64 = TRANSPARENT_1X1_PNG;
       let edodwajaLogoBase64 = TRANSPARENT_1X1_PNG;
       let badgeBase64 = TRANSPARENT_1X1_PNG;
+
+      let effectiveCertId = certNumber || '';
+      let effectiveIssuedAt: string | null = null;
+      if (!effectiveCertId && courseId) {
+        try {
+          const myCerts = await fetchMyCertificates();
+          const match = myCerts.find((c) => String(c.course_id) === String(courseId));
+          if (match?.certificate_number) {
+            effectiveCertId = match.certificate_number;
+            effectiveIssuedAt = match.issued_at;
+          } else {
+            const issued = await issueCertificate(Number(courseId));
+            if (issued?.certificate_number) {
+              effectiveCertId = issued.certificate_number;
+              effectiveIssuedAt = issued.issued_at;
+            }
+          }
+        } catch {
+          // Backend or network failure
+        }
+      }
+
+      if (!effectiveCertId) {
+        if (isMounted) {
+          setCertificateError('Certificate unavailable offline. Please check your internet connection or verify course completion.');
+          setIsLoadingHtml(false);
+        }
+        return;
+      }
+
+      let displayDate = 'N/A';
+      try {
+        const dateToFormat = effectiveIssuedAt || completionDate;
+        const d = dateToFormat ? new Date(dateToFormat) : new Date();
+        if (!isNaN(d.getTime())) {
+          displayDate = d.toLocaleDateString('en-IN', {
+            day: 'numeric',
+            month: 'long',
+            year: 'numeric',
+          });
+        }
+      } catch (err) {
+        displayDate = 'N/A';
+      }
 
       try {
         const resolveAsset = async (module: any) => {
@@ -439,6 +451,9 @@ export default function CertificateScreen() {
               const mime = extension === 'jpg' || extension === 'jpeg' ? 'image/jpeg' : 'image/png';
               return `data:${mime};base64,${base64Data}`;
             }
+            if (uri && Platform.OS === 'web') {
+              return uri;
+            }
             return uri || TRANSPARENT_1X1_PNG;
           } catch (err) {
             console.warn('[Certificate] Error resolving asset:', err);
@@ -458,7 +473,7 @@ export default function CertificateScreen() {
             course,
             daysCompleted ?? 'N/A',
             displayDate,
-            certId,
+            effectiveCertId,
             flowLogoBase64,
             edodwajaLogoBase64,
             badgeBase64,
@@ -475,7 +490,7 @@ export default function CertificateScreen() {
     return () => {
       isMounted = false;
     };
-  }, [student, course, daysCompleted, displayDate, certId, level, instructor]);
+  }, [student, course, daysCompleted, completionDate, courseId, certNumber, level, instructor]);
 
   const handleDownload = async () => {
     if (!htmlContent) return;
@@ -508,64 +523,43 @@ export default function CertificateScreen() {
         console.warn('[Certificate] Directory cleanup warning:', cleanErr);
       }
 
-      const { uri } = await Print.printToFileAsync({ html: htmlContent, base64: false });
+      // Generate standard PDF from HTML template
       const dest = `${dir}certificate_${Date.now()}.pdf`;
-      await FileSystem.moveAsync({ from: uri, to: dest });
+      const { uri } = await Print.printToFileAsync({ html: htmlContent });
+      await FileSystem.copyAsync({ from: uri, to: dest });
 
       if (Platform.OS === 'android') {
-        try {
-          const SAF = (FileSystem as any).StorageAccessFramework;
-          const perm = await SAF.requestDirectoryPermissionsAsync();
-
-          if (!perm.granted) {
-            Alert.alert(
-              'Save Cancelled',
-              'No folder was chosen, so the certificate was not saved.',
-              [{ text: 'OK' }]
-            );
-            setIsGenerating(false);
-            return;
-          }
-
-          const rawBase64 = await FileSystem.readAsStringAsync(dest, {
-            encoding: FileSystem.EncodingType.Base64,
-          });
-          const cleanBase64 = rawBase64.replace(/[\r\n\s]/g, '');
-          const fileName = `MakersFlow_Certificate_${Date.now()}`;
-          const newUri = await SAF.createFileAsync(
-            perm.directoryUri,
-            fileName,
-            'application/pdf'
-          );
-          await FileSystem.writeAsStringAsync(newUri, cleanBase64, {
-            encoding: FileSystem.EncodingType.Base64,
-          });
-
-          Alert.alert('✅ Downloaded!', 'Certificate saved to the folder you chose.', [
-            { text: 'OK' },
-          ]);
-        } catch (safErr) {
-          console.warn('[Certificate] SAF save failed:', safErr);
+        const permissions =
+          await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync();
+        if (!permissions.granted) {
           Alert.alert(
-            'Could Not Save',
-            'Saving to that folder failed. Use the Share button to save it elsewhere.',
+            'Save Cancelled',
+            'No folder was chosen, so the certificate was not saved.',
             [{ text: 'OK' }]
           );
+          return;
         }
-        setIsGenerating(false);
-        return;
-      }
 
-      // iOS
-      const canShareIos = await Sharing.isAvailableAsync();
-      if (canShareIos) {
+        const base64Data = await FileSystem.readAsStringAsync(dest, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+        const fileName = `MakersFlow_Certificate_${Date.now()}`;
+        const createdUri = await FileSystem.StorageAccessFramework.createFileAsync(
+          permissions.directoryUri,
+          fileName,
+          'application/pdf'
+        );
+        await FileSystem.writeAsStringAsync(createdUri, base64Data, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+
+        Alert.alert('✅ Saved!', 'Certificate saved to selected folder.', [{ text: 'OK' }]);
+      } else if (Platform.OS === 'ios') {
         await Sharing.shareAsync(dest, {
           mimeType: 'application/pdf',
           dialogTitle: 'Save Certificate',
           UTI: 'com.adobe.pdf',
         });
-      } else {
-        Alert.alert('✅ Saved!', 'Certificate generated successfully.', [{ text: 'OK' }]);
       }
     } catch (e: any) {
       console.error('[Certificate] Download error:', e);
@@ -607,12 +601,13 @@ export default function CertificateScreen() {
       autoDownload === 'true' &&
       htmlContent &&
       !isLoadingHtml &&
+      !certificateError &&
       !autoDownloadTriggered.current
     ) {
       autoDownloadTriggered.current = true;
       handleDownload();
     }
-  }, [autoDownload, htmlContent, isLoadingHtml]);
+  }, [autoDownload, htmlContent, isLoadingHtml, certificateError]);
 
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
@@ -644,7 +639,28 @@ export default function CertificateScreen() {
 
       {/* Main Preview Container - Single Source of Truth WebView */}
       <View style={styles.previewContainer}>
-        {isLoadingHtml || !htmlContent ? (
+        {certificateError ? (
+          <View style={styles.loadingContainer}>
+            <Feather name="alert-circle" size={44} color={colors.mutedForeground} style={{ marginBottom: 12 }} />
+            <Text
+              style={[
+                styles.headerTitle,
+                TEXT_STYLES.pageTitle,
+                { color: colors.foreground, fontSize: 18, textAlign: 'center', marginBottom: 8 },
+              ]}
+            >
+              Certificate Unavailable
+            </Text>
+            <Text
+              style={[
+                styles.loadingText,
+                { color: colors.mutedForeground, textAlign: 'center', paddingHorizontal: 24 },
+              ]}
+            >
+              {certificateError}
+            </Text>
+          </View>
+        ) : isLoadingHtml || !htmlContent ? (
           <View style={styles.loadingContainer}>
             <ActivityIndicator size="large" color={colors.primary} />
             <Text style={[styles.loadingText, { color: colors.mutedForeground }]}>
@@ -681,10 +697,13 @@ export default function CertificateScreen() {
         <Pressable
           style={[
             styles.btn,
-            { backgroundColor: colors.primary, opacity: isGenerating || isLoadingHtml ? 0.7 : 1 },
+            {
+              backgroundColor: colors.primary,
+              opacity: isGenerating || isLoadingHtml || !htmlContent || !!certificateError ? 0.5 : 1,
+            },
           ]}
           onPress={handleDownload}
-          disabled={isGenerating || isLoadingHtml}
+          disabled={isGenerating || isLoadingHtml || !htmlContent || !!certificateError}
         >
           {isGenerating ? (
             <ActivityIndicator color="#fff" />
@@ -699,8 +718,14 @@ export default function CertificateScreen() {
         </Pressable>
 
         <Pressable
-          style={[styles.shareBtn, { borderColor: colors.primary }]}
-          disabled={isGenerating || isLoadingHtml}
+          style={[
+            styles.shareBtn,
+            {
+              borderColor: colors.primary,
+              opacity: isGenerating || isLoadingHtml || !htmlContent || !!certificateError ? 0.5 : 1,
+            },
+          ]}
+          disabled={isGenerating || isLoadingHtml || !htmlContent || !!certificateError}
           onPress={handleShare}
         >
           <Ionicons

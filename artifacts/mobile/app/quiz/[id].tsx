@@ -43,15 +43,16 @@ export default function QuizScreen() {
 
   useEffect(() => {
     async function loadQuiz() {
-      if (!lessonId) return;
+      if (!lessonId || isNaN(Number(lessonId))) {
+        setIsLoading(false);
+        setQuestions([]);
+        return;
+      }
       setIsLoading(true);
-      try {
-      // 1. Try backend GET /quiz-questions/lesson/:lessonId
-      let loaded = false;
       try {
         const res = await apiRequest<any>(`/quiz-questions/lesson/${lessonId}`);
         const list = res?.data ?? (Array.isArray(res) ? res : null);
-        if (Array.isArray(list) && list.length > 0 && list[0].correct_option_index !== undefined) {
+        if (Array.isArray(list) && list.length > 0) {
           const mapped = list.map((q: any) => {
             let opts = [];
             try {
@@ -63,52 +64,18 @@ export default function QuizScreen() {
               id: q.id,
               question: q.question_text,
               options: opts,
-              correctIndex: q.correct_option_index,
+              correctIndex: q.correct_option_index !== undefined ? Number(q.correct_option_index) : undefined,
               explanation: "Select the correct answer to complete this question.",
             };
           });
           setQuestions(mapped);
           setTimeLeft(mapped.length * 60 || 600);
-          loaded = true;
+        } else {
+          setQuestions([]);
         }
-      } catch {
-        // fallback
-      }
-
-      if (!loaded) {
-        const { data, error } = await supabase
-          .from('quiz_questions')
-          .select('id, question_text, options, correct_option_index, position')
-          .eq('lesson_id', Number(lessonId))
-          .order('position', { ascending: true });
-
-        if (error) {
-          console.error('[Quiz] Error loading questions:', error);
-          return;
-        }
-
-        if (data) {
-          const mapped = data.map((q) => {
-            let opts = [];
-            try {
-              opts = typeof q.options === 'string' ? JSON.parse(q.options) : q.options;
-            } catch (e) {
-              opts = Array.isArray(q.options) ? q.options : [];
-            }
-            return {
-              id: q.id,
-              question: q.question_text,
-              options: opts,
-              correctIndex: q.correct_option_index,
-              explanation: "Select the correct answer to complete this question.",
-            };
-          });
-          setQuestions(mapped);
-          setTimeLeft(mapped.length * 60 || 600);
-        }
-      }
-      } catch (err) {
+      } catch (err: any) {
         console.error('[Quiz] load error:', err);
+        setQuestions([]);
       } finally {
         setIsLoading(false);
       }
@@ -210,10 +177,33 @@ export default function QuizScreen() {
   const mins = Math.floor(timeLeft / 60);
   const secs = timeLeft % 60;
 
-  function selectOption(idx: number) {
+  async function selectOption(idx: number) {
     if (selectedOption !== null) return;
     setSelectedOption(idx);
-    if (idx === question.correctIndex) {
+
+    let isCorrect = false;
+    let correctIdx = question.correctIndex;
+
+    if (correctIdx !== undefined) {
+      isCorrect = idx === correctIdx;
+    } else {
+      try {
+        const { data, error } = await (supabase as any).rpc("check_quiz_answer", {
+          p_question_id: question.id,
+          p_selected_index: idx,
+        });
+        if (!error && data && data.length > 0) {
+          isCorrect = !!data[0].is_correct;
+          correctIdx = Number(data[0].correct_option_index);
+          question.correctIndex = correctIdx;
+          setQuestions([...questions]);
+        }
+      } catch (e) {
+        console.warn("[Quiz] check_quiz_answer error:", e);
+      }
+    }
+
+    if (isCorrect) {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     } else {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
@@ -242,7 +232,7 @@ export default function QuizScreen() {
     if (finishedRef.current) return; // prevent double navigation (timeout + Finish tap)
     finishedRef.current = true;
     if (timerRef.current) clearInterval(timerRef.current);
-    const score = finalAnswers.reduce((s, ans, i) => (ans === questions[i].correctIndex ? s + 1 : s), 0);
+    const score = finalAnswers.reduce((s, ans, i) => (questions[i]?.correctIndex !== undefined && ans === questions[i].correctIndex ? s + 1 : s), 0);
     router.replace({
       pathname: "/quiz/result",
       params: { 
@@ -258,7 +248,7 @@ export default function QuizScreen() {
     if (selectedOption === null) {
       return { bg: colors.card, border: colors.border, text: colors.foreground };
     }
-    if (idx === question.correctIndex) {
+    if (question.correctIndex !== undefined && idx === question.correctIndex) {
       return { bg: "#DCF7F4", border: "#17E5D3", text: "#063B4F" };
     }
     if (idx === selectedOption) {
@@ -316,10 +306,10 @@ export default function QuizScreen() {
                     </Text>
                   </View>
                   <Text style={[styles.optionText, TEXT_STYLES.description, { color: oc.text, flex: 1 }]}>{opt}</Text>
-                  {selectedOption !== null && idx === question.correctIndex && (
+                  {selectedOption !== null && question.correctIndex !== undefined && idx === question.correctIndex && (
                     <Ionicons name="checkmark-circle" size={20} color="#17E5D3" />
                   )}
-                  {selectedOption === idx && idx !== question.correctIndex && (
+                  {selectedOption === idx && question.correctIndex !== undefined && idx !== question.correctIndex && (
                     <Ionicons name="close-circle" size={20} color="#EF4444" />
                   )}
                 </Pressable>

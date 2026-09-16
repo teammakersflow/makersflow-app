@@ -21,14 +21,14 @@ export interface WishlistApiResponse {
  * - Injects JWT Bearer authorization headers from SecureStore token storage.
  * - Handles token refresh on 401 Unauthorized responses.
  * - Derives student identity securely on the backend from the authenticated JWT.
- * - NEVER sends or accepts client-provided `userId` / `user_id`.
+ * - NEVER sends or accepts client-provided `userId` / `user_id` to the backend.
  */
 export const wishlistService = {
   /**
    * Fetch the current authenticated student's wishlisted product IDs.
-   * Endpoint: GET /wishlist/me or GET /wishlist
+   * Endpoint: GET /wishlist/me
    */
-  async getWishlist(): Promise<string[]> {
+  async getWishlist(_userId?: string): Promise<string[]> {
     try {
       const res = await apiClient.get<WishlistApiResponse | WishlistItem[] | any>('/wishlist/me');
       const payload = res?.data ?? res;
@@ -53,7 +53,31 @@ export const wishlistService = {
 
       return [];
     } catch (error: any) {
-      console.warn('[WishlistService] Failed to fetch wishlist from backend:', error?.message || error);
+      console.warn('[WishlistService] Backend /wishlist/me error:', error?.message || error);
+      return [];
+    }
+  },
+
+  /**
+   * Fetch full wishlisted items with product details.
+   * Endpoint: GET /wishlist/me
+   */
+  async getWishlistItems(_userId?: string): Promise<WishlistItem[]> {
+    try {
+      const res = await apiClient.get<any>('/wishlist/me');
+      const payload = res?.data ?? res;
+      if (Array.isArray(payload)) {
+        return payload.map((item: any) => ({
+          id: String(item.id),
+          user_id: item.user_id,
+          product_id: String(item.product_id ?? item.productId ?? item.id),
+          created_at: item.created_at,
+          product: item.products,
+        }));
+      }
+      return [];
+    } catch (error: any) {
+      console.warn('[WishlistService] Backend /wishlist/me items error:', error?.message || error);
       return [];
     }
   },
@@ -62,9 +86,12 @@ export const wishlistService = {
    * Add a product to the authenticated student's wishlist.
    * Endpoint: POST /wishlist/:productId
    */
-  async addToWishlist(productId: string | number): Promise<void> {
+  async addToWishlist(productId: string | number, _userId?: string): Promise<void> {
+    const pidStr = String(productId).trim();
+    if (!pidStr) return;
+
     try {
-      await apiClient.post(`/wishlist/${productId}`);
+      await apiClient.post(`/wishlist/${pidStr}`);
     } catch (error: any) {
       console.error('[WishlistService] Failed to add product to wishlist:', error?.message || error);
       throw error;
@@ -75,10 +102,17 @@ export const wishlistService = {
    * Remove a product from the authenticated student's wishlist.
    * Endpoint: DELETE /wishlist/:productId
    */
-  async removeFromWishlist(productId: string | number): Promise<void> {
+  async removeFromWishlist(productId: string | number, _userId?: string): Promise<void> {
+    const pidStr = String(productId).trim();
+    if (!pidStr) return;
+
     try {
-      await apiClient.delete(`/wishlist/${productId}`);
+      await apiClient.delete(`/wishlist/${pidStr}`);
     } catch (error: any) {
+      if (error?.status === 404) {
+        // Already not in wishlist, treat as non-fatal
+        return;
+      }
       console.error('[WishlistService] Failed to remove product from wishlist:', error?.message || error);
       throw error;
     }
@@ -88,14 +122,17 @@ export const wishlistService = {
    * Helper to toggle wishlist state for a product.
    * Returns the new wishlisted boolean state.
    */
-  async toggleWishlist(productId: string | number, isCurrentlyWishlisted: boolean): Promise<boolean> {
+  async toggleWishlist(
+    productId: string | number,
+    isCurrentlyWishlisted: boolean,
+    userId?: string
+  ): Promise<boolean> {
     if (isCurrentlyWishlisted) {
-      await this.removeFromWishlist(productId);
+      await this.removeFromWishlist(productId, userId);
       return false;
     } else {
-      await this.addToWishlist(productId);
+      await this.addToWishlist(productId, userId);
       return true;
     }
   },
 };
-

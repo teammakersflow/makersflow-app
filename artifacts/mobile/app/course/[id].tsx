@@ -34,7 +34,6 @@ import { useColors } from "@/hooks/useColors";
 import { useAuth } from "@/context/AuthContext";
 import { useCart } from "@/context/CartContext";
 import { useFavorites } from "@/context/FavoritesContext";
-import { supabase } from "@/lib/supabase";
 import { useRequireAuth } from "@/context/AuthRequireContext";
 import { getCourseById, getCourseModules } from "@/services/courseDataProvider";
 import { enrollInCourse, isEnrolled as checkEnrollment, getEnrollment, isExpired } from "@/services/enrollmentService";

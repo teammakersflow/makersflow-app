@@ -30,13 +30,19 @@ import { useFavorites } from "@/context/FavoritesContext";
 import { useProgress } from "@/context/ProgressContext";
 import { getCourseById, getCourseModules } from "@/services/courseDataProvider";
 import { markLessonComplete, upsertLessonProgress, fetchCourseLessonsProgress } from "@/lib/progressStorage";
-import { supabase } from "@/lib/supabase";
 import { apiRequest } from "@/lib/auth/apiClient";
 import { getEnrollment, isExpired, completeCourse } from "@/services/enrollmentService";
 import { onSessionExpired } from "@/lib/sessionEvents";
 import { ActivityIndicator } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { fetchMyReview, upsertReview } from "@/services/reviewService";
+import { issueCertificate } from "@/services/certificateService";
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 export default function LearnScreen() {
   const colors = useColors();
@@ -76,6 +82,11 @@ export default function LearnScreen() {
   const [downloadProgress, setDownloadProgress] = useState<number | null>(null);
   const [isMarkingComplete, setIsMarkingComplete] = useState(false);
 
+  // Signed video URL fetched from NestJS GET /lessons/:id/video.
+  // Kept in runtime state only — never persisted; expires after 300 s.
+  const [signedVideoUrl, setSignedVideoUrl] = useState<string | null>(null);
+  const [isSignedUrlLoading, setIsSignedUrlLoading] = useState(false);
+
   const [myReview, setMyReview] = useState<any>(null);
   const [reviewRating, setReviewRating] = useState(0);
   const [reviewText, setReviewText] = useState('');
@@ -93,65 +104,44 @@ export default function LearnScreen() {
   }, [activeModuleId]);
 
   const [lessonResources, setLessonResources] = useState<
-    { id: string; title: string; url: string; type: string | null }[]
+    { id: string; title: string; url: string; type: string | null; size_bytes?: number | null }[]
   >([]);
   const [lessonNotes, setLessonNotes] = useState<string[]>([]);
   
   useEffect(() => {
-    if (!activeModuleId) { setLessonResources([]); setLessonNotes([]); return; }
+    if (!activeModuleId || isNaN(Number(activeModuleId))) {
+      setLessonResources([]);
+      setLessonNotes([]);
+      return;
+    }
     (async () => {
-      // 1. Fetch lesson resources (backend first, then Supabase fallback)
+      // 1. Fetch lesson resources via NestJS
       try {
-        let resLoaded = false;
-        try {
-          const res = await apiRequest<any>(`/lesson-resources/lesson/${activeModuleId}`);
-          const list = res?.data ?? (Array.isArray(res) ? res : null);
-          if (Array.isArray(list)) {
-            setLessonResources(list.map((r: any) => ({
-              id: String(r.id),
-              title: r.title,
-              url: r.url,
-              type: r.type ?? null,
-            })));
-            resLoaded = true;
-          }
-        } catch {
-          // fallback
-        }
-
-        if (!resLoaded) {
-          const { data } = await supabase
-            .from("lesson_resources")
-            .select("id, title, url, type")
-            .eq("lesson_id", Number(activeModuleId))
-            .order("created_at", { ascending: true });
-          setLessonResources((data as any[]) ?? []);
+        const res = await apiRequest<any>(`/lesson-resources/lesson/${activeModuleId}`);
+        const list = res?.data ?? (Array.isArray(res) ? res : []);
+        if (Array.isArray(list)) {
+          setLessonResources(list.map((r: any) => ({
+            id: String(r.id),
+            title: r.title,
+            url: r.url,
+            type: r.type ?? null,
+            size_bytes: r.size_bytes ? Number(r.size_bytes) : null,
+          })));
+        } else {
+          setLessonResources([]);
         }
       } catch {
         setLessonResources([]);
       }
 
-      // 2. Fetch lesson notes (backend first, then Supabase fallback)
+      // 2. Fetch lesson notes via NestJS
       try {
-        let notesLoaded = false;
-        try {
-          const res = await apiRequest<any>(`/lesson-notes/lesson/${activeModuleId}`);
-          const list = res?.data ?? (Array.isArray(res) ? res : null);
-          if (Array.isArray(list)) {
-            setLessonNotes(list.map((n: any) => n.content));
-            notesLoaded = true;
-          }
-        } catch {
-          // fallback
-        }
-
-        if (!notesLoaded) {
-          const { data } = await supabase
-            .from("lesson_notes")
-            .select("content, position")
-            .eq("lesson_id", Number(activeModuleId))
-            .order("position", { ascending: true });
-          setLessonNotes(((data as any[]) ?? []).map((n) => n.content));
+        const res = await apiRequest<any>(`/lesson-notes/lesson/${activeModuleId}`);
+        const list = res?.data ?? (Array.isArray(res) ? res : []);
+        if (Array.isArray(list)) {
+          setLessonNotes(list.map((n: any) => n.content));
+        } else {
+          setLessonNotes([]);
         }
       } catch {
         setLessonNotes([]);
@@ -260,6 +250,55 @@ export default function LearnScreen() {
     }
   }, [activeModuleId, isLoading]);
 
+  // Fetch a short-lived signed URL from NestJS whenever the active lesson changes.
+  // activeModuleId is the lesson ID (confirmed: flatLessons maps l.id → id).
+  // The backend (GET /lessons/:id/video) enforces enrollment — we never bypass
+  // this check client-side, and we never fall back to the raw video_url.
+  useEffect(() => {
+    if (!activeModuleId || isLoading) return;
+
+    // Offline playback: downloaded file is already local; no signed URL needed.
+    const localPath = downloadedMap[activeModuleId];
+    if (localPath) {
+      setSignedVideoUrl(null);
+      setIsSignedUrlLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setSignedVideoUrl(null);
+    setIsSignedUrlLoading(true);
+
+    apiRequest<{ signedUrl: string; expiresIn: number }>(
+      `/lessons/${activeModuleId}/video`,
+    )
+      .then((res) => {
+        if (!cancelled) {
+          const url = res?.signedUrl ?? null;
+          if (!url) {
+            console.warn('[LearnScreen] No signedUrl in response for lesson', activeModuleId);
+          }
+          setSignedVideoUrl(url);
+        }
+      })
+      .catch((err: any) => {
+        if (!cancelled) {
+          // 401 → apiRequest auto-refreshes; reaches here only if session is gone
+          // 403 → not enrolled → do NOT fall back to raw video_url
+          // 404 → lesson has no video
+          console.warn('[LearnScreen] Signed video URL fetch failed:', err?.message ?? err);
+          setSignedVideoUrl(null);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setIsSignedUrlLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeModuleId, isLoading, downloadedMap]);
+
   const isCourseCompleted = !!enrollment?.completed_at;
   const completedModules = lessonsProgress.filter((p) => p.is_completed).length;
   const effectiveTotalLessons = totalLessons || lessons.length;
@@ -311,6 +350,9 @@ export default function LearnScreen() {
           console.error('[CompleteCourse] error:', e);
         }
       }
+      // Self-issue certificate on NestJS backend
+      issueCertificate(Number(courseId)).catch(() => {});
+
       const certKey = `@cert_shown:${user.id}:${courseId}`;
       const alreadyShown = await AsyncStorage.getItem(certKey);
       if (!alreadyShown) {
@@ -706,12 +748,59 @@ export default function LearnScreen() {
             </Pressable>
           </View>
         ) : (
-          <VideoPlayerEnhanced
-            videoUrl={downloadedPath ?? activeModule.videoUrl}
-            initialTime={initialTime}
-            onProgressUpdate={handleProgressUpdate}
-            onComplete={handleVideoComplete}
-          />
+          (() => {
+            // Protected video playback — never exposes raw video_url for enrolled content.
+            // 1. Offline: serve the downloaded local file.
+            const localPath = downloadedMap[activeModule?.id] ?? downloadedPath;
+            if (localPath) {
+              return (
+                <VideoPlayerEnhanced
+                  videoUrl={localPath}
+                  initialTime={initialTime}
+                  onProgressUpdate={handleProgressUpdate}
+                  onComplete={handleVideoComplete}
+                />
+              );
+            }
+
+            // 2. Signed URL still loading from NestJS.
+            if (isSignedUrlLoading) {
+              return (
+                <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#000', minHeight: 200 }}>
+                  <ActivityIndicator size="large" color="#0B6FAD" />
+                  <Text style={{ color: '#fff', marginTop: 8, fontFamily: 'Inter_400Regular', fontSize: 13 }}>
+                    Loading video…
+                  </Text>
+                </View>
+              );
+            }
+
+            // 3. Signed URL available — play it.
+            if (signedVideoUrl) {
+              return (
+                <VideoPlayerEnhanced
+                  videoUrl={signedVideoUrl}
+                  initialTime={initialTime}
+                  onProgressUpdate={handleProgressUpdate}
+                  onComplete={handleVideoComplete}
+                />
+              );
+            }
+
+            // 4. Signed URL unavailable (403 not enrolled, 404 no video, network error).
+            //    Do NOT fall back to activeModule.videoUrl — that would bypass enrollment.
+            return (
+              <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#000', minHeight: 200, paddingHorizontal: 24, gap: 12 }}>
+                <Feather name="lock" size={36} color="#DC2626" />
+                <Text style={{ color: '#fff', fontFamily: 'Inter_600SemiBold', fontSize: 15, textAlign: 'center' }}>
+                  Video unavailable
+                </Text>
+                <Text style={{ color: 'rgba(255,255,255,0.6)', fontFamily: 'Inter_400Regular', fontSize: 13, textAlign: 'center' }}>
+                  Please ensure you are enrolled in this course and try again.
+                </Text>
+              </View>
+            );
+          })()
         )}
       </View>
 
@@ -789,7 +878,7 @@ export default function LearnScreen() {
                   id: r.id,
                   title: r.title,
                   type: r.type ?? "link",
-                  size: "",
+                  size: r.size_bytes ? formatBytes(r.size_bytes) : "",
                   url: r.url,
                 })),
                 notes: lessonNotes,

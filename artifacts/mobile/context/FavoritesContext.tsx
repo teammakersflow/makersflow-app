@@ -89,7 +89,7 @@ export function FavoritesProvider({ children }: { children: React.ReactNode }) {
       setDownloadedLessons(downloads);
 
       // Load product wishlist via canonical backend service
-      const wishlistIds = await wishlistService.getWishlist();
+      const wishlistIds = await wishlistService.getWishlist(uid);
       setWishlistProductIds(wishlistIds);
     } catch (error) {
       console.error("Failed to load favorites:", error);
@@ -276,7 +276,7 @@ export function FavoritesProvider({ children }: { children: React.ReactNode }) {
     if (isWishlisted) {
       setWishlistProductIds((prev) => prev.filter((id) => id !== String(productId)));
       try {
-        await wishlistService.removeFromWishlist(productId);
+        await wishlistService.removeFromWishlist(productId, userId);
       } catch (err) {
         console.error("Failed to delete from wishlist:", err);
         setWishlistProductIds(prevIds);
@@ -285,7 +285,7 @@ export function FavoritesProvider({ children }: { children: React.ReactNode }) {
     } else {
       setWishlistProductIds((prev) => [...prev, String(productId)]);
       try {
-        await wishlistService.addToWishlist(productId);
+        await wishlistService.addToWishlist(productId, userId);
       } catch (err) {
         console.error("Failed to insert into wishlist:", err);
         setWishlistProductIds(prevIds);

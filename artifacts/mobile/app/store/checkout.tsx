@@ -23,7 +23,6 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useCart } from "@/context/CartContext";
 import { useColors } from "@/hooks/useColors";
 import { useAuth } from "@/context/AuthContext";
-import { supabase } from "@/lib/supabase";
 import { apiRequest } from "@/lib/auth/apiClient";
 import { productService } from "@/services/productService";
 import * as Print from "expo-print";
@@ -256,6 +255,7 @@ export default function CheckoutScreen() {
   const [showPayment, setShowPayment] = useState(false);
   const [razorpayParams, setRazorpayParams] = useState<RazorpayPaymentParams | null>(null);
   const [pendingAddress, setPendingAddress] = useState<any>(null);
+  const isVerifyingRef = useRef(false);
 
   // ── Step tracking: 2 = checkout form, 3 = payment ready ──
   // Payment section only shows when address is selected (for physical) or contact filled (digital)
@@ -359,21 +359,53 @@ export default function CheckoutScreen() {
     }, 0);
     const physicalSubtotal = physicalItems.reduce((s, i) => s + i.product.price * i.quantity, 0);
 
-    supabase.functions.invoke("get-shipping-rate", {
-      body: {
-        deliveryPincode: pincode,
-        weightKg: Math.max(totalWeight, 0.1),
-        declaredValue: Math.max(physicalSubtotal, 1),
+    apiRequest<any>("/shipping/rates", {
+      method: "POST",
+      body: JSON.stringify({
+        pickup_postcode: "500034",
+        delivery_postcode: pincode,
+        weight: Math.max(totalWeight, 0.1),
+        product_type: "physical",
+      }),
+    }).then((res) => {
+      const resData = res?.data?.data ?? res?.data ?? res;
+      const couriers: any[] =
+        resData?.available_courier_companies ??
+        resData?.data?.available_courier_companies ??
+        [];
+
+      if (Array.isArray(couriers) && couriers.length > 0) {
+        const sorted = couriers
+          .filter((c: any) => typeof c.rate === "number" && c.rate > 0)
+          .sort((a: any, b: any) => a.rate - b.rate);
+        if (sorted.length > 0) {
+          const best = sorted[0];
+          setShiprocketRate({
+            success: true,
+            fee: Math.round(best.rate),
+            courierName: best.courier_name ?? "Shiprocket",
+            estimatedDays: best.estimated_delivery_days ? `${best.estimated_delivery_days} days` : (best.etd ?? "3-5 days"),
+            source: "shiprocket",
+          });
+          return;
+        }
       }
-    }).then(({ data, error }) => {
-      if (error || !data || !data.success) {
-        console.warn("[Shiprocket] Edge function calculation failed:", error);
-        setShiprocketRate(null);
-      } else {
-        setShiprocketRate(data);
+
+      if (resData?.fee !== undefined || res?.fee !== undefined) {
+        const obj = resData?.fee !== undefined ? resData : res;
+        setShiprocketRate({
+          success: true,
+          fee: typeof obj.fee === "number" ? Math.round(obj.fee) : null,
+          courierName: obj.courierName ?? obj.courier ?? "Shiprocket",
+          estimatedDays: obj.estimatedDays ?? obj.etd ?? "3-5 days",
+          source: "shiprocket",
+        });
+        return;
       }
+
+      setShiprocketRate(null);
     }).catch((err) => {
-      console.warn("[Shiprocket] calculation exception:", err);
+      console.warn("[Shiprocket] Backend rate calculation failed:", err);
       setShiprocketRate(null);
     }).finally(() => {
       setShippingLoading(false);
@@ -435,7 +467,7 @@ export default function CheckoutScreen() {
   async function loadAddresses(keepSelectedId?: string) {
     if (!user?.id) return;
 
-    // 1. Try backend /shipping-addresses
+    // Load from backend /shipping-addresses
     let loadedData: any[] | null = null;
     try {
       const res = await apiRequest<any>('/shipping-addresses');
@@ -443,20 +475,9 @@ export default function CheckoutScreen() {
       if (Array.isArray(list)) {
         loadedData = list;
       }
-    } catch {
-      // Fallback to Supabase below
-    }
-
-    if (!loadedData) {
-      const { data, error } = await supabase
-        .from("shipping_addresses")
-        .select("*")
-        .eq("user_id", user.id)
-        .order("is_default", { ascending: false });
-
-      if (!error && data) {
-        loadedData = data;
-      }
+    } catch (e: any) {
+      console.warn("[Checkout] Failed to load shipping addresses from backend:", e);
+      return;
     }
 
     if (!loadedData) return;
@@ -529,7 +550,6 @@ export default function CheckoutScreen() {
       phone: formPhone.trim().replace(/^\+91/, ""),
     };
 
-    // 1. Try backend /shipping-addresses
     try {
       if (editingAddressId) {
         await apiRequest(`/shipping-addresses/${editingAddressId}`, {
@@ -553,36 +573,10 @@ export default function CheckoutScreen() {
         await loadAddresses(newId ?? undefined);
         return;
       }
-    } catch {
-      // Fallback to Supabase
-    }
-
-    const addressData = {
-      user_id: user.id,
-      ...addressPayload,
-      address_line2: formAddressLine2.trim() || null,
-    };
-
-    if (editingAddressId) {
-      const { error } = await supabase.from("shipping_addresses").update(addressData).eq("id", Number(editingAddressId));
-      if (error) { Alert.alert("Error", error.message); return; }
-      setShowAddressForm(false);
-      resetAddressForm();
-      // Keep same address selected after edit
-      await loadAddresses(selectedAddressId ?? undefined);
-    } else {
-      const isFirst = addresses.length === 0;
-      const { data: inserted, error } = await supabase
-        .from("shipping_addresses")
-        .insert({ ...addressData, is_default: isFirst })
-        .select()
-        .single();
-      if (error) { Alert.alert("Error", error.message); return; }
-      setShowAddressForm(false);
-      resetAddressForm();
-      // Auto-select the newly added address
-      const newId = inserted?.id ? String(inserted.id) : null;
-      await loadAddresses(newId ?? undefined);
+    } catch (e: any) {
+      const errMsg = Array.isArray(e?.message) ? e.message.join(", ") : (e?.message || "Failed to save address.");
+      Alert.alert("Error", errMsg);
+      return;
     }
   };
 
@@ -595,16 +589,12 @@ export default function CheckoutScreen() {
         {
           text: "Delete", style: "destructive",
           onPress: async () => {
-            let backendDeleted = false;
             try {
               await apiRequest(`/shipping-addresses/${addr.id}`, { method: "DELETE" });
-              backendDeleted = true;
-            } catch {
-              // fallback below
-            }
-            if (!backendDeleted) {
-              const { error } = await supabase.from("shipping_addresses").delete().eq("id", addr.id);
-              if (error) { Alert.alert("Error", error.message); return; }
+            } catch (e: any) {
+              const errMsg = Array.isArray(e?.message) ? e.message.join(", ") : (e?.message || "Failed to delete address.");
+              Alert.alert("Error", errMsg);
+              return;
             }
             // FIX: if deleted address was selected, clear selection so user must pick again
             if (String(selectedAddressId) === String(addr.id)) {
@@ -626,56 +616,31 @@ export default function CheckoutScreen() {
     setPromoLoading(true);
 
     try {
-      // 1. Try backend /coupons/validate
-      try {
-        const res = await apiRequest<any>("/coupons/validate", {
-          method: "POST",
-          body: JSON.stringify({
-            code,
-            order_amount: total,
-            product_ids: items.map((i) => String(i.product.id)),
-          }),
-        });
-        const resData = res?.data ?? res;
-        if (resData?.valid) {
-          setAppliedPromo({
-            code: resData.code || code,
-            discount: Number(resData.discount_amount ?? 0),
-            label: `${resData.code || code} applied`,
-            id: resData.coupon_id,
-          });
-          await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-          return;
-        }
-      } catch (backendErr: any) {
-        if (backendErr?.status && backendErr.status >= 400 && backendErr.status < 500) {
-          setPromoError(backendErr.message || "Invalid coupon code.");
-          return;
-        }
-      }
-
-      // 2. Fallback to Supabase validate-coupon
-      const { data, error } = await supabase.functions.invoke("validate-coupon", {
-        body: {
+      const res = await apiRequest<any>("/coupons/validate", {
+        method: "POST",
+        body: JSON.stringify({
           code,
-          subtotal: total,
-          item_ids: items.map((i) => String(i.product.id)),
-          user_id: user?.id ?? null,
-        },
+          order_amount: total,
+          product_ids: items.map((i) => String(i.product.id)),
+        }),
       });
-
-      if (error) { setPromoError("Could not validate coupon. Try again."); return; }
-      if (!data?.valid) { setPromoError(data?.message || "Invalid coupon code."); return; }
-
-      setAppliedPromo({
-        code,
-        discount: Number(data.discount ?? 0),
-        label: data.label ?? "",
-        id: data.coupon_id,
-      });
-      await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    } catch {
-      setPromoError("Failed to validate coupon.");
+      const resData = res?.data ?? res;
+      if (resData?.valid) {
+        setAppliedPromo({
+          code: resData.code || code,
+          discount: Number(resData.discount_amount ?? 0),
+          label: `${resData.code || code} applied`,
+          id: resData.coupon_id,
+        });
+        await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      } else {
+        setPromoError(resData?.message || "Invalid coupon code.");
+      }
+    } catch (backendErr: any) {
+      const errMsg = Array.isArray(backendErr?.message)
+        ? backendErr.message.join(", ")
+        : (backendErr?.message || "Invalid coupon code.");
+      setPromoError(errMsg);
     } finally {
       setPromoLoading(false);
     }
@@ -699,36 +664,65 @@ export default function CheckoutScreen() {
       return;
     }
 
+    const hasCourses = items.some((i) => (i.product as any).is_course);
+    if (hasCourses) {
+      if (!hasPhysical) {
+        Alert.alert("Course Purchase", "Digital courses require the separate course enrollment flow. Please enroll directly on the course screen.");
+      } else {
+        Alert.alert("Mixed Cart", "Your cart contains both courses and physical products. The store payment flow currently supports physical products only. Please remove courses to proceed with store checkout.");
+      }
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
     try {
-      const cartItems = items.map((item) => ({
-        id: item.product.id,
-        price: item.product.price,
-        qty: item.quantity,
-        is_course: (item.product as any).is_course ?? false,
-        course_id: (item.product as any).course_id ?? null,
-        title: item.product.title,
+      // Deduplicate product lines and strictly validate numeric product IDs as required by Backend (5)
+      const productItemsMap = new Map<string, number>();
+      for (const item of items) {
+        const pid = String(item.product.id).trim();
+        if (!/^\d+$/.test(pid)) {
+          Alert.alert("Invalid Product", `Product "${item.product.title || item.product.id}" has an invalid ID. Store checkout requires valid numeric product IDs.`);
+          setLoading(false);
+          return;
+        }
+        const qty = Math.max(1, Math.floor(item.quantity || 1));
+        productItemsMap.set(pid, (productItemsMap.get(pid) || 0) + qty);
+      }
+
+      const itemsPayload = Array.from(productItemsMap.entries()).map(([productId, quantity]) => ({
+        productId,
+        quantity,
       }));
+
+      if (itemsPayload.length === 0) {
+        Alert.alert("Error", "No physical products found in cart for store checkout.");
+        setLoading(false);
+        return;
+      }
+
+      const shippingAddressPayload = activeAddress
+        ? {
+            name: activeAddress.full_name,
+            address_line1: activeAddress.address_line1,
+            address_line2: activeAddress.address_line2 || undefined,
+            city: activeAddress.city,
+            state: activeAddress.state,
+            pincode: activeAddress.postal_code ?? activeAddress.pincode,
+            phone: activeAddress.phone,
+          }
+        : null;
 
       let rzpOrder;
       try {
-        rzpOrder = await createRazorpayOrder(
-          cartItems,
-          finalTotal,
-          user!.id,
-          hasPhysical && activeAddress
-            ? {
-                name: activeAddress.full_name,
-                address: `${activeAddress.address_line1}${activeAddress.address_line2 ? `, ${activeAddress.address_line2}` : ""}`,
-                city: activeAddress.city,
-                state: activeAddress.state,
-                pincode: activeAddress.postal_code ?? activeAddress.pincode,
-                phone: activeAddress.phone,
-              }
-            : null,
-          appliedPromo?.code ?? null,
-          discount
-        );
+        rzpOrder = await createRazorpayOrder({
+          amount: finalTotal,
+          currency: "INR",
+          receipt: `mobile_${Date.now()}`,
+          items: itemsPayload,
+          shipping_address: shippingAddressPayload,
+          order_type: "product",
+        });
       } catch (orderErr: any) {
         throw new Error(orderErr.message ?? "Failed to create Razorpay order.");
       }
@@ -757,6 +751,9 @@ export default function CheckoutScreen() {
     orderId: string,
     signature: string,
   ) {
+    if (isVerifyingRef.current) return;
+    isVerifyingRef.current = true;
+
     setShowPayment(false);
     setLoading(true);
     try {
@@ -764,15 +761,10 @@ export default function CheckoutScreen() {
         razorpay_order_id: orderId,
         razorpay_payment_id: paymentId,
         razorpay_signature: signature,
-        amount: finalTotal,
-        user_id: user!.id,
-        coupon_code: appliedPromo?.code ?? null,
-        coupon_id: appliedPromo?.id ?? null,
-        discount_amount: discount,
-        tax_amount: taxAmount,
       });
 
       if (!verification.success) {
+        isVerifyingRef.current = false;
         Alert.alert(
           "Verification Failed",
           "We could not verify your payment. If money was deducted, contact support with ID: " + paymentId,
@@ -780,59 +772,68 @@ export default function CheckoutScreen() {
         return;
       }
 
-      // Persist the order via backend student-scoped POST /orders/checkout
-      try {
-        const cartItemsForBackend = items.map((item) => ({
-          id: String(item.product.id),
-          price: Number(item.product.price) || 0,
-          qty: item.quantity,
-          is_course: (item.product as any).is_course ?? false,
-          course_id: (item.product as any).course_id ?? null,
-          title: item.product.title,
-        }));
+      // If backend did not create order during verify, transitional fallback to orderService
+      let createdOrder = verification.order ?? null;
+      if (!createdOrder) {
+        try {
+          const cartItemsForBackend = items.map((item) => ({
+            id: String(item.product.id),
+            price: Number(item.product.price) || 0,
+            qty: item.quantity,
+            is_course: (item.product as any).is_course ?? false,
+            course_id: (item.product as any).course_id ?? null,
+            title: item.product.title,
+          }));
 
-        await orderService.checkoutOrder({
-          total_amount: finalTotal,
-          subtotal: total,
-          tax_amount: taxAmount,
-          discount_amount: discount,
-          order_type: hasPhysical ? 'product' : 'digital',
-          shipping_address: pendingAddress
-            ? {
-                name: pendingAddress.full_name,
-                address: `${pendingAddress.address_line1}${pendingAddress.address_line2 ? `, ${pendingAddress.address_line2}` : ''}`,
-                city: pendingAddress.city,
-                state: pendingAddress.state,
-                pincode: pendingAddress.postal_code ?? pendingAddress.pincode,
-                phone: pendingAddress.phone,
-              }
-            : null,
-          items: cartItemsForBackend,
-          razorpay_order_id: orderId,
-          razorpay_payment_id: paymentId,
-          promo_code: appliedPromo?.code ?? null,
-          coupon_id: appliedPromo?.id ?? null,
-        });
-      } catch (orderSaveErr) {
-        console.error('[Checkout] Failed to persist order via backend:', orderSaveErr);
+          createdOrder = await orderService.checkoutOrder({
+            total_amount: finalTotal,
+            subtotal: total,
+            tax_amount: taxAmount,
+            discount_amount: discount,
+            order_type: hasPhysical ? 'product' : 'digital',
+            shipping_address: pendingAddress
+              ? {
+                  name: pendingAddress.full_name,
+                  address: `${pendingAddress.address_line1}${pendingAddress.address_line2 ? `, ${pendingAddress.address_line2}` : ''}`,
+                  city: pendingAddress.city,
+                  state: pendingAddress.state,
+                  pincode: pendingAddress.postal_code ?? pendingAddress.pincode,
+                  phone: pendingAddress.phone,
+                }
+              : null,
+            items: cartItemsForBackend,
+            razorpay_order_id: orderId,
+            razorpay_payment_id: paymentId,
+            promo_code: appliedPromo?.code ?? null,
+            coupon_id: appliedPromo?.id ?? null,
+          });
+        } catch (orderSaveErr) {
+          console.error('[Checkout] Failed to persist order via backend:', orderSaveErr);
+        }
       }
 
-      // Generate invoice via unified invoiceUtils generator
+      // Prioritize server invoice URL if provided by backend verification
       try {
-        const ordId = Date.now().toString();
-        const seller = await fetchSellerSettings();
-        const invoiceNumber = await generateInvoiceNumber();
+        const ordId = createdOrder?.id ? String(createdOrder.id) : Date.now().toString();
+        const serverInvoiceUrl = verification.invoice?.invoice_url || (createdOrder as any)?.invoice_url;
 
-        const buyerAddress: InvoiceAddress = {
-          name: name || "Customer",
-          line1: pendingAddress?.address_line1 || "",
-          line2: pendingAddress?.address_line2 || undefined,
-          city: pendingAddress?.city || "",
-          state: pendingAddress?.state || "Andhra Pradesh",
-          pincode: pendingAddress?.pincode || "",
-          phone: phone || undefined,
-          gstin: undefined,
-        };
+        if (serverInvoiceUrl) {
+          await setInvoicePath(ordId, serverInvoiceUrl);
+        } else {
+          // Fallback: Generate invoice via unified invoiceUtils generator only if server invoice not supplied
+          const seller = await fetchSellerSettings();
+          const invoiceNumber = await generateInvoiceNumber();
+
+          const buyerAddress: InvoiceAddress = {
+            name: name || "Customer",
+            line1: pendingAddress?.address_line1 || "",
+            line2: pendingAddress?.address_line2 || undefined,
+            city: pendingAddress?.city || "",
+            state: pendingAddress?.state || "Andhra Pradesh",
+            pincode: pendingAddress?.pincode || "",
+            phone: phone || undefined,
+            gstin: undefined,
+          };
 
         // HSN/SAC fallback: uses item.hsn_code / product.hsn_code when available in DB,
         // otherwise falls back to standard HSN 84733099 (goods/kits) / SAC 999294 (services/courses).
@@ -885,7 +886,8 @@ export default function CheckoutScreen() {
           await FileSystem.moveAsync({ from: uri, to: dest });
           await setInvoicePath(ordId, dest);
         }
-      } catch (e) {
+      }
+    } catch (e) {
         console.error("[Checkout] Invoice generation error:", e);
       }
 

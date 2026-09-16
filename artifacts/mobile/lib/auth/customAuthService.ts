@@ -111,4 +111,14 @@ export const customAuthService = {
       // Ignore network errors on local session cleanup
     }
   },
+
+  /**
+   * Delete current user account (DELETE /users/me)
+   * Identity is derived from authenticated JWT Bearer token
+   */
+  async deleteAccount(): Promise<{ success: boolean; message?: string }> {
+    return await apiRequest<{ success: boolean; message?: string }>('/users/me', {
+      method: 'DELETE',
+    });
+  },
 };

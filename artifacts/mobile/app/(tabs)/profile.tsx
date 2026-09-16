@@ -22,6 +22,7 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { SPACING } from "@/constants/spacing";
 import { useAuth } from "@/context/AuthContext";
+import { customAuthService } from "@/lib/auth/customAuthService";
 import { AUTH_FEATURE_FLAGS } from "@/lib/auth/authFeatureFlags";
 import { useProgress } from "@/context/ProgressContext";
 import { useColors } from "@/hooks/useColors";
@@ -29,6 +30,7 @@ import { notificationService } from "@/services/notificationService";
 import { announcementService } from "@/services/announcementService";
 import { getCourseModules } from "@/services/courseDataProvider";
 import { completeCourse, fetchEnrolledCourses } from "@/services/enrollmentService";
+import { issueCertificate } from "@/services/certificateService";
 import { fetchCourseProgress } from "@/lib/progressStorage";
 import { ProductCard } from "@/components/ProductCard";
 import { CertificateSkeleton, WishlistSkeleton } from "@/components/SkeletonLoader";
@@ -173,6 +175,7 @@ export default function ProfileScreen() {
             if (prog.total > 0 && prog.completed >= prog.total) {
               // Auto-persist completed_at to DB so future queries find it on the enrollment row
               completeCourse(user.id, courseId).catch(() => {});
+              issueCertificate(courseId).catch(() => {});
               results.push({
                 courseId,
                 courseTitle,
@@ -265,19 +268,18 @@ export default function ProfileScreen() {
     setIsDeleting(true);
     setDeleteError("");
     try {
-      // Backend does not currently offer automated student self-deletion endpoint.
-      // Sign out session and notify user.
+      await customAuthService.deleteAccount();
       setDeleteModalVisible(false);
       await logout();
       router.replace("/(tabs)");
       Alert.alert(
-        "Account Deletion Request",
-        "Your account deletion request has been registered. Please contact support@makersflow.com to finalize immediate data erasure.",
+        "Account Deleted",
+        "Your account and all associated data have been permanently deleted.",
         [{ text: "OK" }]
       );
     } catch (err: any) {
       console.error("Delete account error:", err);
-      setDeleteError(err.message || "Failed to process request. Please contact support.");
+      setDeleteError(err.message || "Failed to delete account. Please try again.");
       setIsDeleting(false);
     }
   };
@@ -570,6 +572,7 @@ export default function ProfileScreen() {
                         router.push({
                           pathname: "/certificate",
                           params: {
+                            courseId: course.courseId,
                             courseName: course.courseTitle,
                             studentName: user?.name ?? "",
                             completionDate: course.completedAt,
@@ -590,6 +593,7 @@ export default function ProfileScreen() {
                         router.push({
                           pathname: "/certificate",
                           params: {
+                            courseId: course.courseId,
                             courseName: course.courseTitle,
                             studentName: user?.name ?? "",
                             completionDate: course.completedAt,

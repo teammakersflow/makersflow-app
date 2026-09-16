@@ -2,8 +2,8 @@ import * as Device from "expo-device";
 import * as Application from "expo-application";
 import Constants from "expo-constants";
 import { Platform } from "react-native";
-import { supabase } from "@/lib/supabase";
-import { apiRequest } from "@/lib/auth/apiClient";
+import { apiClient } from "@/lib/auth/apiClient";
+import { tokenStorage } from "@/lib/auth/tokenStorage";
 
 const devLog = (...args: any[]) => {
   if (__DEV__) console.log(...args);
@@ -30,10 +30,10 @@ let handlerConfigured = false;
 
 /**
  * Requests permission (if needed), fetches the Expo push token and stores it
- * in the `push_tokens` table so the backend can send pushes to this device.
+ * in the NestJS push-tokens table so the backend can send pushes to this device.
  * Safe to call on every app start — it upserts. No-ops in Expo Go/simulators.
  */
-export async function registerForPushNotifications(userId: string): Promise<string | null> {
+export async function registerForPushNotifications(_userId?: string): Promise<string | null> {
   try {
     if (!Device.isDevice) {
       devLog("[Push] Skipping registration (simulator)");
@@ -106,41 +106,24 @@ export async function registerForPushNotifications(userId: string): Promise<stri
       .filter(Boolean)
       .join(" | ");
 
-    // 1. Try backend POST /push-tokens
-    let backendSuccess = false;
+    // Ensure user has an active JWT before attempting backend registration
+    const accessToken = await tokenStorage.getAccessToken();
+    if (!accessToken) {
+      devLog("[Push] No access token available, skipping push token registration");
+      return token;
+    }
+
     try {
-      await apiRequest("/push-tokens", {
-        method: "POST",
-        body: JSON.stringify({
-          token,
-          platform: Platform.OS,
-          device_info: deviceInfo,
-        }),
+      await apiClient.post("/push-tokens", {
+        token,
+        platform: Platform.OS,
+        device_info: deviceInfo || undefined,
       });
-      backendSuccess = true;
       devLog("[Push] Registered push token with backend");
     } catch (backendErr: any) {
-      devLog("[Push] Backend push token registration failed, trying Supabase:", backendErr?.message || backendErr);
+      devLog("[Push] Backend push token registration failed:", backendErr?.message || backendErr);
     }
 
-    if (!backendSuccess) {
-      const { error } = await supabase.from("push_tokens").upsert(
-        {
-          user_id: userId,
-          token,
-          device_info: deviceInfo,
-          platform: Platform.OS,
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: "token" }
-      );
-      if (error) {
-        devLog("[Push] Failed to persist token:", error.message);
-        return token;
-      }
-    }
-
-    devLog("[Push] Registered push token");
     return token;
   } catch (e: any) {
     devLog("[Push] Registration failed:", e?.message ?? e);
@@ -149,7 +132,7 @@ export async function registerForPushNotifications(userId: string): Promise<stri
 }
 
 /** Remove this device's push token (call on logout). Best-effort. */
-export async function unregisterPushToken(userId: string): Promise<void> {
+export async function unregisterPushToken(_userId?: string): Promise<void> {
   try {
     if (!Device.isDevice) return;
     const Notifications = getNotifications();
@@ -163,23 +146,22 @@ export async function unregisterPushToken(userId: string): Promise<void> {
       projectId ? { projectId } : undefined
     );
     const token = tokenResponse.data;
+    if (!token) return;
+
+    const accessToken = await tokenStorage.getAccessToken();
+    if (!accessToken) return;
 
     try {
-      const res = await apiRequest<any>("/push-tokens");
-      const tokens = res?.data ?? (Array.isArray(res) ? res : []);
+      const res = await apiClient.get<any>("/push-tokens");
+      const tokens = Array.isArray(res?.data) ? res.data : (Array.isArray(res) ? res : []);
       const matched = tokens.find((t: any) => t.token === token);
       if (matched?.id) {
-        await apiRequest(`/push-tokens/${matched.id}`, { method: "DELETE" });
+        await apiClient.delete(`/push-tokens/${matched.id}`);
+        devLog("[Push] Unregistered push token with backend");
       }
-    } catch {
-      // ignore
+    } catch (err: any) {
+      devLog("[Push] Failed to unregister push token:", err?.message || err);
     }
-
-    await supabase
-      .from("push_tokens")
-      .delete()
-      .eq("user_id", userId)
-      .eq("token", token);
   } catch {
     // best-effort cleanup
   }

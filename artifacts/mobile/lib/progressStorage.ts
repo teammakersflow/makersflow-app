@@ -154,7 +154,8 @@ export const ProgressStorage = {
 };
 
 /**
- * Marks a lesson complete via POST /lesson-progress/sync
+ * Marks a lesson complete via backend lesson-progress API.
+ * Uses PATCH /lesson-progress/:id if record exists, or POST /lesson-progress if new.
  * Identity is derived purely from JWT bearer token.
  */
 export async function markLessonComplete(
@@ -163,12 +164,57 @@ export async function markLessonComplete(
   lessonId: string | number,
 ) {
   try {
-    await apiClient.post('/lesson-progress/sync', {
-      course_id: Number(courseId),
-      lesson_id: Number(lessonId),
-      is_completed: true,
-      watch_percentage: 100,
-    });
+    const numCourseId = Number(courseId);
+    const numLessonId = Number(lessonId);
+
+    let existingProgressId: string | undefined;
+    try {
+      const res = await apiClient.get<any>(`/lesson-progress/my/course/${numCourseId}`);
+      const data = res?.data || res;
+      if (data && Array.isArray(data.lessons)) {
+        const matched = data.lessons.find((l: any) => String(l.lesson_id) === String(numLessonId));
+        if (matched?.progress?.id) {
+          existingProgressId = String(matched.progress.id);
+        }
+      }
+    } catch {
+      // ignore fetch error and attempt POST
+    }
+
+    if (existingProgressId) {
+      await apiClient.patch(`/lesson-progress/${existingProgressId}`, {
+        is_completed: true,
+        watch_percentage: 100,
+        last_watched_at: new Date().toISOString(),
+      });
+    } else {
+      try {
+        await apiClient.post('/lesson-progress', {
+          course_id: numCourseId,
+          lesson_id: numLessonId,
+          is_completed: true,
+          watch_percentage: 100,
+          last_watched_at: new Date().toISOString(),
+        });
+      } catch (postErr: any) {
+        if (postErr?.status === 409 || postErr?.statusCode === 409) {
+          const res = await apiClient.get<any>(`/lesson-progress/my/course/${numCourseId}`);
+          const data = res?.data || res;
+          if (data && Array.isArray(data.lessons)) {
+            const matched = data.lessons.find((l: any) => String(l.lesson_id) === String(numLessonId));
+            if (matched?.progress?.id) {
+              await apiClient.patch(`/lesson-progress/${matched.progress.id}`, {
+                is_completed: true,
+                watch_percentage: 100,
+                last_watched_at: new Date().toISOString(),
+              });
+            }
+          }
+        } else {
+          throw postErr;
+        }
+      }
+    }
   } catch (error: any) {
     if (isAuthError(error)) emitSessionExpired();
     console.warn('[progressStorage] markLessonComplete error:', error);
@@ -176,7 +222,8 @@ export async function markLessonComplete(
 }
 
 /**
- * Upserts lesson playback progress via POST /lesson-progress/sync
+ * Upserts lesson playback progress via backend lesson-progress API.
+ * Uses PATCH /lesson-progress/:id if record exists, or POST /lesson-progress if new.
  * Identity is derived purely from JWT bearer token.
  */
 export async function upsertLessonProgress(
@@ -187,15 +234,56 @@ export async function upsertLessonProgress(
   watchPercentage: number,
 ) {
   try {
+    const numCourseId = Number(courseId);
+    const numLessonId = Number(lessonId);
     const isCompleted = watchPercentage >= 90;
-    await apiClient.post('/lesson-progress/sync', {
-      course_id: Number(courseId),
-      lesson_id: Number(lessonId),
-      current_time_secs: Math.floor(currentTimeSecs),
-      watch_percentage: Math.round(watchPercentage),
-      time_spent_secs: Math.floor(currentTimeSecs),
-      is_completed: isCompleted ? true : undefined,
-    });
+
+    let existingProgressId: string | undefined;
+    try {
+      const res = await apiClient.get<any>(`/lesson-progress/my/course/${numCourseId}`);
+      const data = res?.data || res;
+      if (data && Array.isArray(data.lessons)) {
+        const matched = data.lessons.find((l: any) => String(l.lesson_id) === String(numLessonId));
+        if (matched?.progress?.id) {
+          existingProgressId = String(matched.progress.id);
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    const payload: Record<string, any> = {
+      current_time_secs: Math.max(0, Math.floor(currentTimeSecs)),
+      watch_percentage: Math.max(0, Math.min(100, Math.round(watchPercentage))),
+      time_spent_secs: Math.max(0, Math.floor(currentTimeSecs)),
+      last_watched_at: new Date().toISOString(),
+    };
+    if (isCompleted) {
+      payload.is_completed = true;
+    }
+
+    if (existingProgressId) {
+      await apiClient.patch(`/lesson-progress/${existingProgressId}`, payload);
+    } else {
+      try {
+        await apiClient.post('/lesson-progress', {
+          course_id: numCourseId,
+          lesson_id: numLessonId,
+          ...payload,
+        });
+      } catch (postErr: any) {
+        if (postErr?.status === 409 || postErr?.statusCode === 409) {
+          const res = await apiClient.get<any>(`/lesson-progress/my/course/${numCourseId}`);
+          const data = res?.data || res;
+          if (data && Array.isArray(data.lessons)) {
+            const matched = data.lessons.find((l: any) => String(l.lesson_id) === String(numLessonId));
+            if (matched?.progress?.id) {
+              await apiClient.patch(`/lesson-progress/${matched.progress.id}`, payload);
+            }
+          }
+        }
+      }
+    }
   } catch (error: any) {
     console.error('[progress] upsert error', error);
     if (isAuthError(error)) emitSessionExpired();
@@ -203,21 +291,25 @@ export async function upsertLessonProgress(
 }
 
 /**
- * Fetches course-level progress via GET /lesson-progress/course/:courseId
+ * Fetches course-level progress via GET /lesson-progress/my/course/:courseId
  */
 export async function fetchCourseProgress(
   _userId: string,
   courseId: string | number,
 ) {
   try {
-    const res = await apiClient.get<any>(`/lesson-progress/course/${courseId}`);
+    const res = await apiClient.get<any>(`/lesson-progress/my/course/${courseId}`);
     const data = res?.data || res;
 
-    if (data && data.totalLessons !== undefined) {
-      const completed = data.completedLessonsCount || 0;
-      const total = data.totalLessons || 0;
-      const percentage = data.completionPercentage || 0;
-      const watchMinutes = (data.totalTimeSpentSecs || 0) / 60;
+    if (data && (data.total_lessons !== undefined || data.totalLessons !== undefined)) {
+      const completed = data.completed_lessons ?? data.completedLessonsCount ?? 0;
+      const total = data.total_lessons ?? data.totalLessons ?? 0;
+      const percentage = data.completion_percentage ?? data.completionPercentage ?? 0;
+      const watchMinutes =
+        (data.lessons || []).reduce(
+          (sum: number, l: any) => sum + (Number(l.progress?.time_spent_secs) || 0),
+          0,
+        ) / 60 || (data.totalTimeSpentSecs || 0) / 60;
 
       return { completed, total, percentage, watchMinutes };
     }
@@ -230,18 +322,33 @@ export async function fetchCourseProgress(
 }
 
 /**
- * Fetches per-lesson progress for a course via GET /lesson-progress/course/:courseId
+ * Fetches per-lesson progress for a course via GET /lesson-progress/my/course/:courseId
  */
 export async function fetchCourseLessonsProgress(
   _userId: string,
   courseId: string | number,
 ) {
   try {
-    const res = await apiClient.get<any>(`/lesson-progress/course/${courseId}`);
+    const res = await apiClient.get<any>(`/lesson-progress/my/course/${courseId}`);
     const data = res?.data || res;
+
+    if (data && Array.isArray(data.lessons)) {
+      return data.lessons
+        .filter((l: any) => l.progress != null)
+        .map((l: any) => ({
+          id: l.progress.id ? String(l.progress.id) : undefined,
+          lesson_id: l.lesson_id,
+          current_time_secs: Number(l.progress.current_time_secs) || 0,
+          watch_percentage: Number(l.progress.watch_percentage) || 0,
+          is_completed: Boolean(l.progress.is_completed),
+          time_spent_secs: Number(l.progress.time_spent_secs) || 0,
+          last_watched_at: l.progress.last_watched_at,
+        }));
+    }
 
     if (data && Array.isArray(data.lessonsProgress)) {
       return data.lessonsProgress.map((p: any) => ({
+        id: p.id ? String(p.id) : undefined,
         lesson_id: p.lesson_id,
         current_time_secs: Number(p.current_time_secs) || 0,
         watch_percentage: Number(p.watch_percentage) || 0,
@@ -276,11 +383,17 @@ export async function fetchRemoteProgress(userId: string): Promise<UserCoursePro
 
       const [modules, courseProgRes] = await Promise.all([
         getCourseModules(courseId).catch(() => []),
-        apiClient.get<any>(`/lesson-progress/course/${courseId}`).catch(() => null),
+        apiClient.get<any>(`/lesson-progress/my/course/${courseId}`).catch(() => null),
       ]);
 
       const courseProgData = courseProgRes?.data || courseProgRes;
-      const progressList: any[] = courseProgData?.lessonsProgress || [];
+      const progressList: any[] =
+        courseProgData?.lessonsProgress ||
+        (courseProgData?.lessons
+          ? courseProgData.lessons
+              .filter((l: any) => l.progress != null)
+              .map((l: any) => ({ ...l.progress, lesson_id: l.lesson_id }))
+          : []);
 
       const courseProgressObj: UserCourseProgress = {
         userId,

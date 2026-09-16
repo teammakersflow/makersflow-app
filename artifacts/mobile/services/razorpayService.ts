@@ -2,56 +2,63 @@ import { apiClient } from "@/lib/auth/apiClient";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-export type RazorpayCartItem = {
-  id: string;
-  price: number;
-  qty: number;
-  is_course?: boolean;
-  course_id?: string | null;
-  title?: string;
+export type CreateRazorpayOrderItem = {
+  productId: string | number;
+  quantity: number;
+};
+
+export type CreateRazorpayOrderParams = {
+  items: CreateRazorpayOrderItem[];
+  amount?: number;
+  currency?: string;
+  receipt?: string;
+  shipping_address?: Record<string, any> | null;
+  order_type?: string;
 };
 
 export type RazorpayOrderResult = {
   id: string;        // Razorpay order_id  e.g. "order_Abc123"
   amount: number;    // in paise           e.g. 49900 for ₹499
   currency: string;  // "INR"
-  key_id: string;    // Razorpay Key ID    e.g. "rzp_live_..."
+  key_id: string;    // Razorpay Key ID    e.g. "rzp_test_..."
+  pricing?: {
+    subtotal: string;
+    tax_amount: string;
+    shipping_amount: string;
+    discount_amount: string;
+    total_amount: string;
+    items?: any[];
+  };
 };
 
 export type PaymentVerifyParams = {
   razorpay_order_id: string;
   razorpay_payment_id: string;
   razorpay_signature: string;
-  amount?: number;
-  user_id?: string;
-  coupon_code?: string | null;
-  coupon_id?: string | null;
-  discount_amount?: number;
-  tax_amount?: number;
 };
 
 // ─── Create Razorpay Order ────────────────────────────────────────────────────
 // Calls backend POST /payments/create-order with JWT bearer authentication.
 // Student identity is derived exclusively from JWT on the backend.
+// The backend calculates authoritative total from database prices and GST.
 
 export async function createRazorpayOrder(
-  _items?: RazorpayCartItem[],
-  totalAmount = 0,
-  _userId?: string,
-  _shippingAddress?: any,
-  _promoCode?: string | null,
-  _discountAmount?: number
+  params: CreateRazorpayOrderParams,
 ): Promise<RazorpayOrderResult> {
   try {
     const res = await apiClient.post<any>("/payments/create-order", {
-      amount: totalAmount,
-      currency: "INR",
+      amount: params.amount,
+      currency: params.currency || "INR",
+      receipt: params.receipt,
+      items: params.items,
+      shipping_address: params.shipping_address,
+      order_type: params.order_type || "product",
     });
 
     const data = res?.data || res;
 
     if (!data?.razorpay_order_id && !data?.id) {
-      throw new Error("Invalid response from payment server");
+      throw new Error("Invalid response from payment server: missing order ID");
     }
 
     return {
@@ -59,6 +66,7 @@ export async function createRazorpayOrder(
       amount: data.amount,
       currency: data.currency || "INR",
       key_id: data.key_id,
+      pricing: data.pricing,
     };
   } catch (error: any) {
     console.error("[RazorpayService] createRazorpayOrder error:", error);
@@ -70,9 +78,16 @@ export async function createRazorpayOrder(
 // Calls backend POST /payments/verify to cryptographically validate the HMAC signature.
 // Student identity is derived exclusively from JWT on the backend.
 
+export type PaymentVerifyResult = {
+  success: boolean;
+  payment_id?: string;
+  order?: any;
+  invoice?: any;
+};
+
 export async function verifyRazorpayPayment(
   params: PaymentVerifyParams,
-): Promise<{ success: boolean; payment_id?: string }> {
+): Promise<PaymentVerifyResult> {
   try {
     const res = await apiClient.post<any>("/payments/verify", {
       razorpay_order_id: params.razorpay_order_id,
@@ -81,9 +96,14 @@ export async function verifyRazorpayPayment(
     });
 
     const data = res?.data || res;
-    const verified = Boolean(data?.success ?? true);
+    const verified = data?.success === true;
 
-    return { success: verified, payment_id: params.razorpay_payment_id };
+    return {
+      success: verified,
+      payment_id: params.razorpay_payment_id,
+      order: data?.order,
+      invoice: data?.invoice,
+    };
   } catch (error: any) {
     console.error("[RazorpayService] verifyRazorpayPayment error:", error);
     throw new Error(error?.message || "Payment verification failed");

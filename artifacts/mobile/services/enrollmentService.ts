@@ -25,7 +25,12 @@ export async function enrollInCourse(
   if (!courseId) throw new Error('courseId is required for enrollment');
 
   try {
-    const res = await apiClient.post(`/courses/${courseId}/enroll`);
+    let res: any;
+    try {
+      res = await apiClient.post('/enrollments/free', { course_id: Number(courseId) });
+    } catch {
+      res = await apiClient.post(`/courses/${courseId}/enroll`);
+    }
     await invalidateCaches();
     return res?.data || res;
   } catch (error: any) {
@@ -35,12 +40,17 @@ export async function enrollInCourse(
 }
 
 /**
- * Fetches all active/valid enrollments for the authenticated student via GET /enrollments/me.
+ * Fetches all active/valid enrollments for the authenticated student via GET /enrollments/my.
  * Identity is derived purely from JWT.
  */
 export async function fetchEnrolledCourses(_userId?: string) {
   try {
-    const res = await apiClient.get<any>('/enrollments/me');
+    let res: any;
+    try {
+      res = await apiClient.get<any>('/enrollments/my');
+    } catch {
+      res = await apiClient.get<any>('/enrollments/me');
+    }
     const data = res?.data || res || [];
 
     const REJECTED_PAYMENT_STATES = ['pending', 'failed', 'cancelled', 'refunded'];

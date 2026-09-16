@@ -1,4 +1,3 @@
-import { supabase } from '@/lib/supabase';
 import { customAuthService, AuthLoginResponse, AuthUserResponse } from '@/lib/auth/customAuthService';
 import { tokenStorage } from '@/lib/auth/tokenStorage';
 import type { Profile } from '@/types/auth';

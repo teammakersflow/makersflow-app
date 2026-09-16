@@ -25,8 +25,8 @@ import { WatchlistCard } from "@/components/WatchlistCard";
 import { SectionHeader } from "@/components/SectionHeader";
 import { useAuth } from "@/context/AuthContext";
 import { fetchEnrolledCourses } from "@/services/enrollmentService";
-import { supabase } from "@/lib/supabase";
 import { apiRequest } from "@/lib/auth/apiClient";
+import { isNetworkError } from "@/lib/networkUtils";
 import { ProgressCalculator } from "@/lib/progressCalculator";
 import { HomeSkeleton } from "@/components/SkeletonLoader";
 import { fetchCourseProgress, fetchCourseLessonsProgress } from "@/lib/progressStorage";
@@ -178,18 +178,22 @@ export default function ProgressScreen() {
       const totalTimeSpentSecs = progressList.reduce((sum, p) => sum + creditedSecs(p), 0);
       const totalTimeSpent = totalTimeSpentSecs / 60;
       const totalLessonsCompleted = progressList.filter((p) => p.is_completed).length;
-      // calculateStreak returns { current, longest } — rendering the raw
-      // object as a React child crashes the screen, so extract the number.
-      const streakResult = ProgressCalculator.calculateStreak(progressList);
-      let learningStreak = streakResult?.current ?? 0;
+      // Authoritative streak from backend /streaks/me
+      let learningStreak = 0;
       try {
         const streakRes = await apiRequest<any>('/streaks/me');
-        const sData = streakRes?.data ?? streakRes;
+        const sData = streakRes?.data ?? (streakRes && typeof streakRes.current_streak === 'number' ? streakRes : null);
         if (sData && typeof sData.current_streak === 'number') {
           learningStreak = sData.current_streak;
+        } else if (streakRes?.data === null) {
+          learningStreak = 0;
         }
-      } catch {
-        // Fall back to locally computed streak
+      } catch (err: any) {
+        // Fall back to locally computed streak ONLY on genuine network/offline error
+        if (isNetworkError(err)) {
+          const streakResult = ProgressCalculator.calculateStreak(progressList);
+          learningStreak = streakResult?.current ?? 0;
+        }
       }
 
       const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -261,58 +265,26 @@ export default function ProgressScreen() {
         recentlyCompleted: topRecentlyCompleted,
       });
 
-      // Fetch Leaderboard from Backend /leaderboard (with Supabase fallback)
+      // Fetch Leaderboard from Backend /leaderboard
       setIsLoadingLeaderboard(true);
       try {
-        let backendLeaderboardSuccess = false;
-        try {
-          const lbRes = await apiRequest<any>('/leaderboard');
-          const lbData = lbRes?.data ?? (Array.isArray(lbRes) ? lbRes : []);
-          if (Array.isArray(lbData) && lbData.length > 0) {
-            const mapped = lbData.map((item: any, index: number) => ({
-              rank: item.rank ?? index + 1,
-              name: item.name || "Unknown Student",
-              points: item.longest_streak ?? 0,
-              avatar: item.avatar || null,
-              isSelf: item.user_id === user.id,
-            }));
-            setLeaderboard(mapped);
-            backendLeaderboardSuccess = true;
-          }
-        } catch (backendLbErr) {
-          console.warn('[Progress] Backend /leaderboard failed, falling back to Supabase:', backendLbErr);
-        }
-
-        if (!backendLeaderboardSuccess) {
-          const { data: streakData, error: streakError } = await supabase
-            .from('streaks')
-            .select('user_id, longest_streak')
-            .order('longest_streak', { ascending: false })
-            .limit(10);
-
-          if (!streakError && streakData && streakData.length > 0) {
-            const userIds = streakData.map((s) => s.user_id);
-            const { data: profilesData, error: profilesError } = await supabase
-              .from('profiles')
-              .select('id, full_name')
-              .in('id', userIds);
-
-            if (!profilesError && profilesData) {
-              const mapped = streakData.map((s, index) => {
-                const profile = profilesData.find((p) => p.id === s.user_id);
-                return {
-                  rank: index + 1,
-                  name: profile?.full_name || "Unknown Student",
-                  points: s.longest_streak,
-                  isSelf: s.user_id === user.id,
-                };
-              });
-              setLeaderboard(mapped);
-            }
-          }
+        const lbRes = await apiRequest<any>('/leaderboard');
+        const lbData = lbRes?.data ?? (Array.isArray(lbRes) ? lbRes : []);
+        if (Array.isArray(lbData)) {
+          const mapped = lbData.map((item: any, index: number) => ({
+            rank: item.rank ?? index + 1,
+            name: item.name || "Unknown Student",
+            points: item.longest_streak ?? 0,
+            avatar: item.avatar || null,
+            isSelf: item.user_id === user.id,
+          }));
+          setLeaderboard(mapped);
+        } else {
+          setLeaderboard([]);
         }
       } catch (err) {
         console.error('[Progress] Error loading leaderboard:', err);
+        setLeaderboard([]);
       } finally {
         setIsLoadingLeaderboard(false);
       }

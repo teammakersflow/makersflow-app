@@ -26,7 +26,6 @@
  * TTL expiry       → cacheManager returns null; next online load overwrites.
  */
 
-import { supabase } from '@/lib/supabase';
 import { STORAGE_KEYS } from '@/constants/storageKeys';
 import { CACHE_POLICY } from '@/constants/cachePolicy';
 import { cacheManager, networkResult, cacheResult, RepositoryResult } from '@/services/cacheManager';
@@ -42,6 +41,7 @@ import { fetchCourseRatingsSummary } from '@/services/reviewService';
 import { fetchProductRatingsSummary } from '@/services/productReviewService';
 import { productService } from '@/services/productService';
 import { promotionService } from '@/services/promotionService';
+import { apiRequest } from '@/lib/auth/apiClient';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -197,9 +197,22 @@ async function fetchProgress(userId: string): Promise<HomeProgress> {
       })
   );
 
-  const streakResult = lpData.length > 0 ? ProgressCalculator.calculateStreak(lpData) : { current: 0, longest: 0 };
-  const learningStreak        = streakResult.current;
-  const longestStreak         = streakResult.longest;
+  let learningStreak = 0;
+  let longestStreak = 0;
+  try {
+    const streakRes = await apiRequest<any>('/streaks/me');
+    const sData = streakRes?.data ?? (streakRes && typeof streakRes.current_streak === 'number' ? streakRes : null);
+    if (sData) {
+      learningStreak = sData.current_streak ?? 0;
+      longestStreak = sData.longest_streak ?? 0;
+    }
+  } catch (err: any) {
+    if (isNetworkError(err)) {
+      const streakResult = lpData.length > 0 ? ProgressCalculator.calculateStreak(lpData) : { current: 0, longest: 0 };
+      learningStreak = streakResult.current;
+      longestStreak = streakResult.longest;
+    }
+  }
   const totalLessonsCompleted = lpData.filter((p) => p.is_completed).length;
 
   // Learning time reflects real lesson durations: a completed lesson credits
