@@ -80,7 +80,9 @@ export async function createRazorpayOrder(
 
 export type PaymentVerifyResult = {
   success: boolean;
+  message?: string;
   payment_id?: string;
+  payment?: any;
   order?: any;
   invoice?: any;
 };
@@ -100,7 +102,9 @@ export async function verifyRazorpayPayment(
 
     return {
       success: verified,
+      message: data?.message,
       payment_id: params.razorpay_payment_id,
+      payment: data?.payment,
       order: data?.order,
       invoice: data?.invoice,
     };

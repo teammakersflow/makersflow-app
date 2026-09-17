@@ -48,7 +48,6 @@ import {
   createRazorpayOrder,
   verifyRazorpayPayment,
 } from "@/services/razorpayService";
-import { orderService } from "@/services/orderService";
 
 // ─── Slide-to-Pay Button ─────────────────────────────────────────────────────
 
@@ -772,49 +771,13 @@ export default function CheckoutScreen() {
         return;
       }
 
-      // If backend did not create order during verify, transitional fallback to orderService
-      let createdOrder = verification.order ?? null;
-      if (!createdOrder) {
-        try {
-          const cartItemsForBackend = items.map((item) => ({
-            id: String(item.product.id),
-            price: Number(item.product.price) || 0,
-            qty: item.quantity,
-            is_course: (item.product as any).is_course ?? false,
-            course_id: (item.product as any).course_id ?? null,
-            title: item.product.title,
-          }));
+      // Backend (6) fulfills order, order_items, inventory, and invoice atomically in POST /payments/verify
+      const createdOrder = verification.order ?? null;
+      const ordId = createdOrder?.id ? String(createdOrder.id) : orderId;
+      const paidTotal = createdOrder?.total_amount ? Number(createdOrder.total_amount) : finalTotal;
 
-          createdOrder = await orderService.checkoutOrder({
-            total_amount: finalTotal,
-            subtotal: total,
-            tax_amount: taxAmount,
-            discount_amount: discount,
-            order_type: hasPhysical ? 'product' : 'digital',
-            shipping_address: pendingAddress
-              ? {
-                  name: pendingAddress.full_name,
-                  address: `${pendingAddress.address_line1}${pendingAddress.address_line2 ? `, ${pendingAddress.address_line2}` : ''}`,
-                  city: pendingAddress.city,
-                  state: pendingAddress.state,
-                  pincode: pendingAddress.postal_code ?? pendingAddress.pincode,
-                  phone: pendingAddress.phone,
-                }
-              : null,
-            items: cartItemsForBackend,
-            razorpay_order_id: orderId,
-            razorpay_payment_id: paymentId,
-            promo_code: appliedPromo?.code ?? null,
-            coupon_id: appliedPromo?.id ?? null,
-          });
-        } catch (orderSaveErr) {
-          console.error('[Checkout] Failed to persist order via backend:', orderSaveErr);
-        }
-      }
-
-      // Prioritize server invoice URL if provided by backend verification
+      // Prioritize server invoice URL provided by backend verification
       try {
-        const ordId = createdOrder?.id ? String(createdOrder.id) : Date.now().toString();
         const serverInvoiceUrl = verification.invoice?.invoice_url || (createdOrder as any)?.invoice_url;
 
         if (serverInvoiceUrl) {
@@ -896,7 +859,7 @@ export default function CheckoutScreen() {
 
       Alert.alert(
         "🎉 Payment Successful!",
-        `₹${finalTotal} paid.\nPayment ID: ${paymentId.slice(-8)}${appliedPromo ? `\nYou saved ₹${discount}!` : ""}`,
+        `₹${paidTotal} paid.\nPayment ID: ${paymentId.slice(-8)}${appliedPromo ? `\nYou saved ₹${discount}!` : ""}`,
         [
           { text: "View Orders", onPress: () => router.replace("/store/orders") },
           { text: "OK", onPress: () => router.replace("/(tabs)") },
@@ -909,6 +872,7 @@ export default function CheckoutScreen() {
         `Payment was successful (ID: ${paymentId}) but order saving failed. Please contact support.`,
       );
     } finally {
+      isVerifyingRef.current = false;
       setLoading(false);
       setPendingAddress(null);
       setRazorpayParams(null);
