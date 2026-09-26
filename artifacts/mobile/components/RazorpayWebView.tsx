@@ -8,8 +8,13 @@ import {
   Text,
   Platform,
   SafeAreaView,
+  Image,
 } from "react-native";
 import { WebView, WebViewMessageEvent, WebViewProps } from "react-native-webview";
+
+const LOCAL_BRAND_ICON =
+  Image.resolveAssetSource(require("@/assets/images/logos/icon.png"))?.uri ||
+  "https://makersflow.in/makersflow-logo-dark.png";
 
 // react-native-webview's class-component typings collapse to `never` under
 // React 19's stricter types. Alias with explicit props so TS type-checks the
@@ -95,7 +100,7 @@ function buildRazorpayHTML(p: RazorpayPaymentParams): string {
       order_id:    "${p.orderId}",
       name:        "MakersFlow",
       description: "${safeDesc}",
-      image:       "https://oodqutwsljhvuyotuthu.supabase.co/storage/v1/object/public/assets/icon.png",
+      image:       "${LOCAL_BRAND_ICON}",
       prefill: {
         name:    "${safeName}",
         email:   "${safeEmail}",

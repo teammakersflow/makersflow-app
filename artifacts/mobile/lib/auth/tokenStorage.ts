@@ -74,11 +74,9 @@ export const tokenStorage = {
       }
       await SecureStore.deleteItemAsync(ACCESS_TOKEN_KEY).catch(() => {});
       await SecureStore.deleteItemAsync(REFRESH_TOKEN_KEY).catch(() => {});
-      await SecureStore.deleteItemAsync('supabase.auth.token').catch(() => {});
       await SecureStore.deleteItemAsync('makersflow.auth').catch(() => {});
       await AsyncStorage.removeItem(ACCESS_TOKEN_KEY).catch(() => {});
       await AsyncStorage.removeItem(REFRESH_TOKEN_KEY).catch(() => {});
-      await AsyncStorage.removeItem('supabase.auth.token').catch(() => {});
       await AsyncStorage.removeItem('makersflow.auth').catch(() => {});
     } catch {
       try {

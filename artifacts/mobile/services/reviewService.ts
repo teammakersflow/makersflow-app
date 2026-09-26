@@ -1,24 +1,4 @@
-import { apiClient, ApiError } from "@/lib/auth/apiClient";
-import { supabase } from "@/lib/supabase";
-
-function isNetworkOrUnavailable(err: any): boolean {
-  if (!err) return false;
-  if (err instanceof ApiError) {
-    return (
-      err.status === 0 ||
-      err.status === 408 ||
-      err.status === 502 ||
-      err.status === 503 ||
-      err.status === 504
-    );
-  }
-  return (
-    err.name === "AbortError" ||
-    (typeof err.message === "string" &&
-      (err.message.toLowerCase().includes("network") ||
-        err.message.toLowerCase().includes("failed to fetch")))
-  );
-}
+import { apiClient } from "@/lib/auth/apiClient";
 
 export interface Review {
   id: string;
@@ -47,10 +27,9 @@ export interface CourseRatingItem {
 
 /**
  * Fetch all approved reviews for a course, newest first via GET /reviews/course/:courseId.
- * Falls back to Supabase only on genuine backend/network unavailability.
+ * Source of truth: Backend (6) REST API.
  */
 export async function fetchCourseReviews(courseId: string | number): Promise<Review[]> {
-  const numericCourseId = Number(courseId);
   try {
     const res = await apiClient.get<any>(`/reviews/course/${encodeURIComponent(String(courseId))}`);
     const raw = res?.data !== undefined && res?.success !== undefined ? res.data : res;
@@ -71,57 +50,20 @@ export async function fetchCourseReviews(courseId: string | number): Promise<Rev
       };
     });
   } catch (error: any) {
-    if (!isNetworkOrUnavailable(error)) {
-      console.warn(`[ReviewService] Backend /reviews/course/${courseId} application error:`, error?.message || error);
-      return [];
-    }
-
-    console.warn(`[ReviewService] Backend unavailable, attempting Supabase fallback for course reviews ${courseId}:`, error?.message || error);
-    try {
-      const { data, error: sbError } = await supabase
-        .from("reviews")
-        .select("id, user_id, course_id, rating, comment, status, created_at, users!user_id(id, full_name, avatar_url)")
-        .eq("course_id", numericCourseId)
-        .eq("status", "approved")
-        .order("created_at", { ascending: false });
-
-      if (sbError) {
-        console.warn("[ReviewService] Supabase course reviews fallback error:", sbError);
-        return [];
-      }
-
-      return (data || []).map((r: any) => {
-        const userInfo = r.users || null;
-        return {
-          id: String(r.id),
-          user_id: String(r.user_id),
-          course_id: Number(r.course_id),
-          rating: Number(r.rating) || 5,
-          comment: r.comment ?? null,
-          status: r.status,
-          created_at: r.created_at || new Date().toISOString(),
-          user: userInfo,
-          users: userInfo,
-        };
-      });
-    } catch (fallbackErr) {
-      console.warn("[ReviewService] Supabase course reviews fallback unexpected error:", fallbackErr);
-      return [];
-    }
+    console.warn(`[ReviewService] Backend /reviews/course/${courseId} error:`, error?.message || error);
+    return [];
   }
 }
 
 /**
  * Fetch the current authenticated student's review for a course (or null) via GET /reviews/course/:courseId/my.
- * Student identity is derived exclusively from JWT.
- * Falls back to Supabase only on genuine backend/network unavailability.
+ * Student identity is derived exclusively from JWT on Backend (6).
  */
 export async function fetchMyReview(
-  userId?: string,
+  _userId?: string,
   courseId?: string | number,
 ): Promise<Review | null> {
   if (!courseId) return null;
-  const numericCourseId = Number(courseId);
 
   try {
     const res = await apiClient.get<any>(`/reviews/course/${encodeURIComponent(String(courseId))}/my`);
@@ -144,97 +86,35 @@ export async function fetchMyReview(
       users: userInfo,
     };
   } catch (error: any) {
-    if (!isNetworkOrUnavailable(error)) {
-      console.warn(`[ReviewService] Backend /reviews/course/${courseId}/my application error:`, error?.message || error);
-      return null;
-    }
-
-    if (!userId) return null;
-
-    console.warn(`[ReviewService] Backend unavailable, attempting Supabase fallback for my review ${courseId}:`, error?.message || error);
-    try {
-      const { data, error: sbError } = await supabase
-        .from("reviews")
-        .select("id, user_id, course_id, rating, comment, status, created_at")
-        .eq("course_id", numericCourseId)
-        .eq("user_id", userId)
-        .maybeSingle();
-
-      if (sbError || !data) return null;
-
-      return {
-        id: String(data.id),
-        user_id: String(data.user_id),
-        course_id: Number(data.course_id),
-        rating: Number(data.rating) || 5,
-        comment: data.comment ?? null,
-        status: data.status,
-        created_at: data.created_at || new Date().toISOString(),
-        user: null,
-        users: null,
-      };
-    } catch (fallbackErr) {
-      console.warn("[ReviewService] Supabase my review fallback unexpected error:", fallbackErr);
-      return null;
-    }
+    console.warn(`[ReviewService] Backend /reviews/course/${courseId}/my error:`, error?.message || error);
+    return null;
   }
 }
 
 /**
  * Insert or update current student's review for a course via POST /reviews/course/:courseId.
- * Student identity is derived exclusively from JWT on the backend.
- * Falls back to Supabase only on genuine backend/network unavailability.
+ * Student identity is derived exclusively from JWT on Backend (6).
  */
 export async function upsertReview(
-  userId: string | undefined,
+  _userId: string | undefined,
   courseId: string | number,
   rating: number,
   comment: string,
 ): Promise<void> {
-  const numericCourseId = Number(courseId);
-
   try {
     await apiClient.post<any>(`/reviews/course/${encodeURIComponent(String(courseId))}`, {
       rating: Math.round(rating),
       comment: comment?.trim() || undefined,
     });
-    // On success: do NOT write to Supabase (no dual writes)
   } catch (error: any) {
-    if (!isNetworkOrUnavailable(error)) {
-      // Real application/validation error: rethrow directly
-      console.error(`[ReviewService] upsertReview application error for ${courseId}:`, error?.message || error);
-      throw error;
-    }
-
-    console.warn(`[ReviewService] Backend unavailable on upsertReview for ${courseId}, attempting bounded Supabase fallback:`, error?.message || error);
-    if (!userId) {
-      throw error;
-    }
-
-    const { error: sbError } = await supabase
-      .from("reviews")
-      .upsert(
-        {
-          user_id: userId,
-          course_id: numericCourseId,
-          rating: Math.round(rating),
-          comment: comment?.trim() || null,
-          status: "pending",
-        },
-        { onConflict: "user_id,course_id" }
-      );
-
-    if (sbError) {
-      console.error("[ReviewService] Supabase upsertReview fallback error:", sbError);
-      throw sbError;
-    }
+    console.error(`[ReviewService] upsertReview error for ${courseId}:`, error?.message || error);
+    throw error;
   }
 }
 
 /**
  * Fetch lightweight course ratings summary via GET /reviews/ratings/courses.
  * Normalizes backend Prisma groupBy format (_avg, _count) into compatible individual entries.
- * Falls back to Supabase only on genuine backend/network unavailability.
  */
 export async function fetchCourseRatingsSummary(): Promise<CourseRatingItem[]> {
   try {
@@ -259,30 +139,7 @@ export async function fetchCourseRatingsSummary(): Promise<CourseRatingItem[]> {
 
     return items;
   } catch (error: any) {
-    if (!isNetworkOrUnavailable(error)) {
-      console.warn("[ReviewService] Backend /reviews/ratings/courses application error:", error?.message || error);
-      return [];
-    }
-
-    console.warn("[ReviewService] Backend unavailable, attempting Supabase fallback for course ratings summary:", error?.message || error);
-    try {
-      const { data, error: sbError } = await supabase
-        .from("reviews")
-        .select("course_id, rating")
-        .eq("status", "approved");
-
-      if (sbError) {
-        console.warn("[ReviewService] Supabase course ratings summary fallback error:", sbError);
-        return [];
-      }
-
-      return (data || []).map((r: any) => ({
-        course_id: Number(r.course_id),
-        rating: Number(r.rating) || 0,
-      }));
-    } catch (fallbackErr) {
-      console.warn("[ReviewService] Supabase course ratings fallback unexpected error:", fallbackErr);
-      return [];
-    }
+    console.warn("[ReviewService] Backend /reviews/ratings/courses error:", error?.message || error);
+    return [];
   }
 }

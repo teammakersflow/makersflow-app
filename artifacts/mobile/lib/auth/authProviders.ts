@@ -26,37 +26,44 @@ export class GoogleAuthProvider implements IAuthProvider {
   constructor(private customRedirectUri?: string) {}
 
   async authenticate(): Promise<AuthCredentials> {
-    const redirectUrl = this.customRedirectUri || Linking.createURL('auth/callback', { scheme: 'makersflow' });
     const clientId = process.env.EXPO_PUBLIC_GOOGLE_CLIENT_ID;
 
-    if (clientId) {
-      const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?` + new URLSearchParams({
-        client_id: clientId,
-        redirect_uri: redirectUrl,
-        response_type: 'id_token',
-        scope: 'openid email profile',
-        nonce: Math.random().toString(36).substring(2),
-      }).toString();
-
-      const result = await WebBrowser.openAuthSessionAsync(authUrl, redirectUrl);
-
-      if (result.type === 'success' && result.url) {
-        const hashFragment = result.url.includes('#') ? result.url.split('#')[1] : '';
-        const queryString = result.url.includes('?') ? result.url.split('?')[1].split('#')[0] : '';
-        const params = new URLSearchParams(hashFragment || queryString);
-        const idToken = params.get('id_token') || params.get('idToken');
-
-        if (idToken) {
-          return { provider: 'google', idToken };
-        }
-      }
+    if (!clientId || clientId.trim() === '') {
+      throw new Error(
+        'Google authentication is not configured: EXPO_PUBLIC_GOOGLE_CLIENT_ID is missing from the mobile environment.'
+      );
     }
 
-    // In development / test mode fallback if client ID is not configured or during local testing
-    return {
-      provider: 'google',
-      idToken: 'test_google_id_token_123',
-    };
+    const redirectUrl = this.customRedirectUri || Linking.createURL('auth/callback', { scheme: 'makersflow' });
+
+    const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?` + new URLSearchParams({
+      client_id: clientId,
+      redirect_uri: redirectUrl,
+      response_type: 'id_token',
+      scope: 'openid email profile',
+      nonce: Math.random().toString(36).substring(2),
+    }).toString();
+
+    const result = await WebBrowser.openAuthSessionAsync(authUrl, redirectUrl);
+
+    if (result.type === 'success' && result.url) {
+      const hashFragment = result.url.includes('#') ? result.url.split('#')[1] : '';
+      const queryString = result.url.includes('?') ? result.url.split('?')[1].split('#')[0] : '';
+      const params = new URLSearchParams(hashFragment || queryString);
+      const idToken = params.get('id_token') || params.get('idToken');
+
+      if (idToken) {
+        return { provider: 'google', idToken };
+      }
+
+      throw new Error('Failed to retrieve Google ID token from OAuth callback.');
+    }
+
+    if (result.type === 'cancel' || result.type === 'dismiss') {
+      throw new Error('Google sign-in was cancelled by the user.');
+    }
+
+    throw new Error('Google sign-in could not be completed.');
   }
 }
 

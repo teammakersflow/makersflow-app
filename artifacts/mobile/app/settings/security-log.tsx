@@ -5,16 +5,7 @@ import { ActivityIndicator, Platform, Pressable, ScrollView, StyleSheet, Text, V
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useColors } from '@/hooks/useColors';
 import { useAuth } from '@/context/AuthContext';
-import { supabase } from '@/lib/supabase';
-import { apiRequest, ApiError } from '@/lib/auth/apiClient';
-
-function isNetworkOrUnavailable(err: any): boolean {
-  if (!err) return false;
-  if (err instanceof ApiError) {
-    return err.status === 0 || err.status === 408 || err.status === 502 || err.status === 503 || err.status === 504;
-  }
-  return err.name === 'AbortError' || (typeof err.message === 'string' && err.message.toLowerCase().includes('network'));
-}
+import { apiRequest } from '@/lib/auth/apiClient';
 
 export default function SecurityLogScreen() {
   const colors = useColors();
@@ -31,33 +22,14 @@ export default function SecurityLogScreen() {
       const raw = res?.data !== undefined ? res.data : res;
       if (Array.isArray(raw)) {
         setEvents(raw);
-        setIsLoading(false);
-        return;
+      } else {
+        setEvents([]);
       }
     } catch (err: any) {
-      if (!isNetworkOrUnavailable(err)) {
-        console.error('[LoginActivity] NestJS API error (not masked):', err);
-        setIsLoading(false);
-        return;
-      }
-      console.warn('[LoginActivity] NestJS unavailable, attempting Supabase fallback:', err?.message || err);
+      console.error('[LoginActivity] NestJS API error:', err);
+    } finally {
+      setIsLoading(false);
     }
-
-    try {
-      const { data, error } = await supabase
-        .from('login_events')
-        .select('id, device_info, created_at, is_flagged')
-        .eq('user_id', user.id)
-        .order('created_at', { ascending: false })
-        .limit(50);
-      if (!error && data) {
-        setEvents(data);
-      }
-    } catch (fallbackErr) {
-      console.error('[LoginActivity] Supabase fallback error:', fallbackErr);
-    }
-
-    setIsLoading(false);
   };
 
   useEffect(() => {
@@ -75,28 +47,9 @@ export default function SecurityLogScreen() {
           style: "destructive",
           onPress: async () => {
             try {
-              let deletedOnBackend = false;
-              try {
-                await apiRequest(`/users/me/security-logs/${eventId}`, {
-                  method: 'DELETE',
-                });
-                deletedOnBackend = true;
-              } catch (backendErr: any) {
-                if (!isNetworkOrUnavailable(backendErr)) {
-                  // Real backend API error (401, 403, 404, etc.) - do NOT mask with fallback
-                  throw backendErr;
-                }
-                console.warn('[LoginActivity] NestJS delete unavailable, attempting Supabase fallback:', backendErr?.message || backendErr);
-              }
-
-              if (!deletedOnBackend) {
-                const { error } = await supabase
-                  .from('login_events')
-                  .delete()
-                  .eq('id', eventId);
-                if (error) throw error;
-              }
-
+              await apiRequest(`/users/me/security-logs/${eventId}`, {
+                method: 'DELETE',
+              });
               setEvents((prev) => prev.filter((ev) => String(ev.id) !== String(eventId)));
             } catch (err: any) {
               console.error('[LoginActivity] Delete error:', err);
@@ -120,39 +73,13 @@ export default function SecurityLogScreen() {
           style: "destructive",
           onPress: async () => {
             try {
-              let cleared = false;
               if (events.length > 0) {
-                try {
-                  const results = await Promise.allSettled(
-                    events.map((ev) =>
-                      apiRequest(`/users/me/security-logs/${ev.id}`, { method: 'DELETE' })
-                    )
-                  );
-                  const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
-                  const realApiErr = rejected.find((r) => !isNetworkOrUnavailable(r.reason));
-                  if (realApiErr) {
-                    throw realApiErr.reason;
-                  }
-                  const anySuccess = results.some((r) => r.status === 'fulfilled');
-                  if (anySuccess) {
-                    cleared = true;
-                  }
-                } catch (batchErr: any) {
-                  if (!isNetworkOrUnavailable(batchErr)) {
-                    throw batchErr;
-                  }
-                  console.warn('[LoginActivity] NestJS clear all failed with network issue:', batchErr?.message || batchErr);
-                }
+                await Promise.all(
+                  events.map((ev) =>
+                    apiRequest(`/users/me/security-logs/${ev.id}`, { method: 'DELETE' })
+                  )
+                );
               }
-
-              if (!cleared) {
-                const { error } = await supabase
-                  .from('login_events')
-                  .delete()
-                  .eq('user_id', user.id);
-                if (error) throw error;
-              }
-
               setEvents([]);
             } catch (err: any) {
               console.error('[LoginActivity] Clear all error:', err);

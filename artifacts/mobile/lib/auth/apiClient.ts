@@ -1,5 +1,8 @@
 import { tokenStorage } from './tokenStorage';
 import { emitSessionExpired } from '@/lib/sessionEvents';
+import { Platform } from 'react-native';
+import * as Device from 'expo-device';
+import Constants from 'expo-constants';
 
 export function getApiBaseUrl(): string {
   const envUrl = process.env.EXPO_PUBLIC_API_URL;
@@ -14,7 +17,30 @@ export function getApiBaseUrl(): string {
     return envUrl;
   }
 
-  return envUrl || 'http://localhost:3001';
+  const rawUrl = envUrl || 'http://localhost:3000';
+
+  // If developer explicitly configured a remote/non-localhost URL, respect it directly
+  if (!rawUrl.includes('localhost') && !rawUrl.includes('127.0.0.1')) {
+    return rawUrl;
+  }
+
+  // Development runtime host resolution for localhost / 127.0.0.1:
+  // 1. Android Emulator: map loopback to 10.0.2.2
+  if (Platform.OS === 'android' && !Device.isDevice) {
+    return rawUrl.replace('localhost', '10.0.2.2').replace('127.0.0.1', '10.0.2.2');
+  }
+
+  // 2. Physical device (Android / iOS) running via Expo Go / dev client:
+  // Dynamically resolve developer machine IP from Metro bundler hostUri if available
+  if (Device.isDevice && Constants.expoConfig?.hostUri) {
+    const hostIp = Constants.expoConfig.hostUri.split(':')[0];
+    if (hostIp) {
+      return rawUrl.replace('localhost', hostIp).replace('127.0.0.1', hostIp);
+    }
+  }
+
+  // 3. iOS Simulator & Web: localhost is directly reachable
+  return rawUrl;
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -70,9 +96,12 @@ async function performTokenRefresh(): Promise<string | null> {
     const payload = await response.json();
     const data = payload?.data || payload;
 
-    if (data?.accessToken && data?.refreshToken) {
-      await tokenStorage.saveTokens(data.accessToken, data.refreshToken);
-      return data.accessToken;
+    const newAccessToken = data?.accessToken;
+    const nextRefreshToken = data?.refreshToken || refreshToken;
+
+    if (newAccessToken && nextRefreshToken) {
+      await tokenStorage.saveTokens(newAccessToken, nextRefreshToken);
+      return newAccessToken;
     }
 
     await tokenStorage.clearTokens();

@@ -23,7 +23,6 @@ import { SPACING } from "@/constants/spacing";
 import { useCart } from "@/context/CartContext";
 import { Product } from "@/data/mockData";
 import { useColors } from "@/hooks/useColors";
-import { supabase } from "@/lib/supabase";
 import { DetailSkeleton } from "@/components/SkeletonLoader";
 import { cacheManager } from "@/services/cacheManager";
 import { productService } from "@/services/productService";
@@ -32,7 +31,6 @@ import { ImageGallery } from "@/components/ImageGallery";
 import { parseThumbnailUrls } from "@/lib/thumbnailUtils";
 import { useAuth } from "@/context/AuthContext";
 import { orderService } from "@/services/orderService";
-import { ApiError } from "@/lib/auth/apiClient";
 import {
   fetchProductReviews,
   fetchMyProductReview,
@@ -40,14 +38,6 @@ import {
   type ProductReview,
 } from "@/services/productReviewService";
 import { ActivityIndicator, TextInput } from "react-native";
-
-function isNetworkOrUnavailable(err: any): boolean {
-  if (!err) return false;
-  if (err instanceof ApiError) {
-    return err.status === 0 || err.status === 408 || err.status === 502 || err.status === 503 || err.status === 504;
-  }
-  return err.name === 'AbortError' || (typeof err.message === 'string' && err.message.toLowerCase().includes('network'));
-}
 
 const productFallbacks: Record<string, any[]> = {
   physical: [
@@ -294,12 +284,7 @@ export default function ProductDetailScreen() {
         setRefreshing(false);
       }
 
-      // Parallelize all secondary below-the-fold requests in a single parallel batch
-      const imagesList = mapped.images ?? [];
-      const mediaPromise = imagesList.length <= 1
-        ? supabase.from('product_media').select('*').eq('product_id', Number(id))
-        : Promise.resolve({ data: null, error: null });
-
+      // Parallelize secondary below-the-fold requests in a single parallel batch
       const reviewsPromise = fetchProductReviews(id);
 
       const myReviewPromise = user?.id
@@ -312,34 +297,17 @@ export default function ProductDetailScreen() {
               const myOrders = await orderService.getMyOrders();
               return { data: myOrders, error: null };
             } catch (err: any) {
-              if (isNetworkOrUnavailable(err)) {
-                console.warn('[ProductDetail] NestJS orders unavailable, attempting Supabase fallback:', err?.message || err);
-                return supabase
-                  .from("orders")
-                  .select("items, status")
-                  .eq("user_id", user.id)
-                  .in("status", ["paid", "completed"]);
-              }
-              console.error('[ProductDetail] NestJS /orders/my error (not masked):', err);
+              console.error('[ProductDetail] NestJS /orders/my error:', err);
               return { data: null, error: err };
             }
           })()
         : Promise.resolve({ data: null, error: null });
 
-      Promise.allSettled([mediaPromise, reviewsPromise, myReviewPromise, ordersPromise]).then(
-        ([mediaRes, reviewsRes, myReviewRes, ordersRes]) => {
+      Promise.allSettled([reviewsPromise, myReviewPromise, ordersPromise]).then(
+        ([reviewsRes, myReviewRes, ordersRes]) => {
           if (cancelledRef.current) return;
 
-          // 1. Extra media
-          if (mediaRes.status === 'fulfilled' && (mediaRes.value as any)?.data?.length > 0) {
-            const mediaRows = (mediaRes.value as any).data;
-            const extra = extractProductImages({ images: mediaRows }, mapped.thumbnail);
-            if (extra.length > imagesList.length) {
-              setProduct((prev) => prev ? { ...prev, images: extra } : null);
-            }
-          }
-
-          // 2. Reviews
+          // 1. Reviews
           if (reviewsRes.status === 'fulfilled' && Array.isArray(reviewsRes.value)) {
             const reviewsData = reviewsRes.value;
             setAllReviews(reviewsData);
