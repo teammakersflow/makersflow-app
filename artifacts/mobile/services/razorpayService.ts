@@ -14,6 +14,7 @@ export type CreateRazorpayOrderParams = {
   receipt?: string;
   shipping_address?: Record<string, any> | null;
   order_type?: string;
+  coupon_code?: string;
 };
 
 export type RazorpayOrderResult = {
@@ -53,6 +54,7 @@ export async function createRazorpayOrder(
       items: params.items,
       shipping_address: params.shipping_address,
       order_type: params.order_type || "product",
+      coupon_code: params.coupon_code,
     });
 
     const data = res?.data || res;

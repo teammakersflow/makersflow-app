@@ -721,6 +721,7 @@ export default function CheckoutScreen() {
           items: itemsPayload,
           shipping_address: shippingAddressPayload,
           order_type: "product",
+          coupon_code: appliedPromo?.code || undefined,
         });
       } catch (orderErr: any) {
         throw new Error(orderErr.message ?? "Failed to create Razorpay order.");
