@@ -8,12 +8,10 @@ import {
   Text,
   Platform,
   SafeAreaView,
-  Image,
 } from "react-native";
 import { WebView, WebViewMessageEvent, WebViewProps } from "react-native-webview";
 
 const LOCAL_BRAND_ICON =
-  Image.resolveAssetSource(require("@/assets/images/logos/icon.png"))?.uri ||
   "https://makersflow.in/makersflow-logo-dark.png";
 
 // react-native-webview's class-component typings collapse to `never` under

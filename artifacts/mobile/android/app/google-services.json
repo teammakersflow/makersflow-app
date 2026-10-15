@@ -1,26 +1,36 @@
 {
   "project_info": {
-    "project_number": "181660701105",
-    "project_id": "makersflow-86444",
-    "storage_bucket": "makersflow-86444.firebasestorage.app"
+    "project_number": "708273277845",
+    "project_id": "makersflow-501314",
+    "storage_bucket": "makersflow-501314.firebasestorage.app"
   },
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:181660701105:android:dad6bbf3398ea214386d90",
+        "mobilesdk_app_id": "1:708273277845:android:c406a07a0b23e44b6c449c",
         "android_client_info": {
           "package_name": "com.makersflow.app"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "708273277845-odd56t5ma558pop3qh8avku9kvp4em9r.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
-          "current_key": "AIzaSyAG2gn4QyDrsuO3C3rvWQuH4Igz4pvqDZ4"
+          "current_key": "AIzaSyCX4FlgmIUY0jtxLhNu-CAc8vMcQwpn26A"
         }
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "708273277845-odd56t5ma558pop3qh8avku9kvp4em9r.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
         }
       }
     }

@@ -1,7 +1,4 @@
-import * as WebBrowser from 'expo-web-browser';
-import * as Linking from 'expo-linking';
-
-WebBrowser.maybeCompleteAuthSession();
+import { GoogleSignin, statusCodes } from '@react-native-google-signin/google-signin';
 
 export type AuthProviderType = 'google' | 'apple' | 'email' | 'otp';
 
@@ -19,51 +16,69 @@ export interface IAuthProvider {
 
 /**
  * Google Auth Provider Strategy
+ *
+ * Uses native Google Sign-In on Android/iOS.
+ * The web OAuth client ID is supplied so Google returns an ID token
+ * that can be sent to the MakersFlow backend.
  */
 export class GoogleAuthProvider implements IAuthProvider {
   readonly type: AuthProviderType = 'google';
 
-  constructor(private customRedirectUri?: string) {}
-
   async authenticate(): Promise<AuthCredentials> {
-    const clientId = process.env.EXPO_PUBLIC_GOOGLE_CLIENT_ID;
+    const webClientId = process.env.EXPO_PUBLIC_GOOGLE_CLIENT_ID;
 
-    if (!clientId || clientId.trim() === '') {
+    if (!webClientId || webClientId.trim() === '') {
       throw new Error(
         'Google authentication is not configured: EXPO_PUBLIC_GOOGLE_CLIENT_ID is missing from the mobile environment.'
       );
     }
 
-    const redirectUrl = this.customRedirectUri || Linking.createURL('auth/callback', { scheme: 'makersflow' });
+    console.log('[GoogleAuth] Configuring native Google Sign-In');
 
-    const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?` + new URLSearchParams({
-      client_id: clientId,
-      redirect_uri: redirectUrl,
-      response_type: 'id_token',
-      scope: 'openid email profile',
-      nonce: Math.random().toString(36).substring(2),
-    }).toString();
+    GoogleSignin.configure({
+      webClientId,
+      scopes: ['openid', 'email', 'profile'],
+    });
 
-    const result = await WebBrowser.openAuthSessionAsync(authUrl, redirectUrl);
+    try {
+      await GoogleSignin.hasPlayServices({
+        showPlayServicesUpdateDialog: true,
+      });
 
-    if (result.type === 'success' && result.url) {
-      const hashFragment = result.url.includes('#') ? result.url.split('#')[1] : '';
-      const queryString = result.url.includes('?') ? result.url.split('?')[1].split('#')[0] : '';
-      const params = new URLSearchParams(hashFragment || queryString);
-      const idToken = params.get('id_token') || params.get('idToken');
+      const response = await GoogleSignin.signIn();
 
-      if (idToken) {
-        return { provider: 'google', idToken };
+      if (response.type !== 'success') {
+        throw new Error('Google sign-in was cancelled by the user.');
       }
 
-      throw new Error('Failed to retrieve Google ID token from OAuth callback.');
-    }
+      const idToken = response.data.idToken;
 
-    if (result.type === 'cancel' || result.type === 'dismiss') {
-      throw new Error('Google sign-in was cancelled by the user.');
-    }
+      if (!idToken) {
+        throw new Error('Google Sign-In succeeded, but no ID token was returned.');
+      }
 
-    throw new Error('Google sign-in could not be completed.');
+      console.log('[GoogleAuth] Native Google Sign-In successful');
+
+      return {
+        provider: 'google',
+        idToken,
+        email: response.data.user.email,
+      };
+    } catch (error: any) {
+      if (error?.code === statusCodes.SIGN_IN_CANCELLED) {
+        throw new Error('Google sign-in was cancelled by the user.');
+      }
+
+      if (error?.code === statusCodes.IN_PROGRESS) {
+        throw new Error('Google sign-in is already in progress.');
+      }
+
+      if (error?.code === statusCodes.PLAY_SERVICES_NOT_AVAILABLE) {
+        throw new Error('Google Play Services are not available or need to be updated.');
+      }
+
+      console.error('[GoogleAuth] Native Google Sign-In error:', error);
+      throw new Error(error?.message || 'Google sign-in could not be completed.');
+    }
   }
 }
-
