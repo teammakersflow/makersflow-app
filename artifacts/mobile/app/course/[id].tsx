@@ -43,6 +43,7 @@ import { parseThumbnailUrls } from "@/lib/thumbnailUtils";
 import { homeRepository } from "@/repositories/homeRepository";
 import { coursesRepository } from "@/repositories/coursesRepository";
 import { productService } from "@/services/productService";
+import { fetchCourseKit, CourseKitResponse } from "@/services/courseKitService";
 
 export default function CourseDetailScreen() {
   const colors = useColors();
@@ -56,6 +57,7 @@ export default function CourseDetailScreen() {
   const { requireAuth } = useRequireAuth();
 
   const [course, setCourse] = useState<any>(null);
+  const [courseKit, setCourseKit] = useState<CourseKitResponse | null>(null);
   const [modules, setModules] = useState<any[]>([]);
   const [lessonsProgress, setLessonsProgress] = useState<any[]>([]);
   const [isEnrolled, setIsEnrolled] = useState(false);
@@ -101,7 +103,15 @@ export default function CourseDetailScreen() {
   const [isOfflineCached, setIsOfflineCached] = useState(false);
 
   const loadCourseData = useCallback(async (isRefreshing = false, cancelledRef = { current: false }) => {
-    if (!id) return;
+    if (!id) {
+      setCourseKit(null);
+      return;
+    }
+
+    // Kit data is optional; fetch it independently of course loading.
+    void fetchCourseKit(id).then((result) => {
+      if (!cancelledRef.current) setCourseKit(result);
+    });
     if (!isRefreshing) {
       setIsLoading(true);
     }
@@ -601,6 +611,123 @@ export default function CourseDetailScreen() {
               </View>
             ))}
           </View>
+
+          {/* Course kit */}
+          {courseKit?.kit && (
+            <View style={{
+              marginTop: 16,
+              marginBottom: 16,
+              padding: 14,
+              borderRadius: 14,
+              borderWidth: 1,
+              borderColor: colors.border,
+              backgroundColor: colors.background,
+              gap: 12,
+            }}>
+              <View style={{
+                alignSelf: "flex-start",
+                backgroundColor: courseKit.kit_included ? "#DCFCE7" : "#FEF3C7",
+                paddingHorizontal: 10,
+                paddingVertical: 6,
+                borderRadius: 20,
+              }}>
+                <Text style={{
+                  color: courseKit.kit_included ? "#166534" : "#92400E",
+                  fontSize: 12,
+                  fontFamily: "Inter_600SemiBold",
+                }}>
+                  {courseKit.kit_included ? "Kit included with course" : "Kit sold separately"}
+                </Text>
+              </View>
+
+              <Text style={{
+                color: colors.foreground,
+                fontSize: 18,
+                fontFamily: "Inter_600SemiBold",
+              }}>
+                {courseKit.kit.name}
+              </Text>
+
+              {!!courseKit.kit.description && (
+                <Text style={{ color: colors.mutedForeground, fontSize: 14 }}>
+                  {courseKit.kit.description}
+                </Text>
+              )}
+
+              {courseKit.kit.items.map((item) => (
+                <View key={item.product_id} style={{
+                  flexDirection: "row",
+                  alignItems: "center",
+                  gap: 10,
+                  paddingVertical: 6,
+                }}>
+                  {item.image ? (
+                    <Image
+                      source={{ uri: item.image }}
+                      style={{ width: 48, height: 48, borderRadius: 8, backgroundColor: colors.muted }}
+                      resizeMode="cover"
+                      onError={() => {
+                        setCourseKit((current) => current ? ({
+                          ...current,
+                          kit: current.kit ? {
+                            ...current.kit,
+                            items: current.kit.items.map((entry) =>
+                              entry.product_id === item.product_id ? { ...entry, image: null } : entry
+                            ),
+                          } : null,
+                        }) : null);
+                      }}
+                    />
+                  ) : (
+                    <View style={{
+                      width: 48,
+                      height: 48,
+                      borderRadius: 8,
+                      backgroundColor: colors.muted,
+                      alignItems: "center",
+                      justifyContent: "center",
+                    }}>
+                      <Ionicons name="cube-outline" size={22} color={colors.mutedForeground} />
+                    </View>
+                  )}
+
+                  <View style={{ flex: 1, gap: 3 }}>
+                    <Text numberOfLines={2} style={{
+                      color: colors.foreground,
+                      fontSize: 14,
+                      fontFamily: "Inter_600SemiBold",
+                    }}>
+                      {item.title}
+                    </Text>
+                    <Text style={{ color: colors.mutedForeground, fontSize: 12 }}>
+                      {`Qty ${item.quantity}${!courseKit.kit_included && item.price != null ? ` · ₹${item.price} each` : ""}`}
+                    </Text>
+                    {!item.available && (
+                      <Text style={{ color: "#DC2626", fontSize: 12, fontFamily: "Inter_600SemiBold" }}>
+                        Out of stock
+                      </Text>
+                    )}
+                  </View>
+                </View>
+              ))}
+
+              {!courseKit.kit.all_available && (
+                <Text style={{ color: "#DC2626", fontSize: 13 }}>
+                  Some kit items are currently out of stock.
+                </Text>
+              )}
+
+              <Text style={{
+                color: colors.mutedForeground,
+                fontSize: 13,
+                lineHeight: 19,
+              }}>
+                {courseKit.kit_included
+                  ? "After you buy this course, confirm your shipping address to receive the kit at no extra cost."
+                  : "This course is free, but the kit isn't included. You can buy the kit separately from the Store."}
+              </Text>
+            </View>
+          )}
 
           {/* Tab bar */}
           <View style={styles.tabBar}>
