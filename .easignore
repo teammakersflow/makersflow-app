@@ -1,0 +1,71 @@
+﻿# Dependencies and generated package files
+**/node_modules/
+**/.pnpm-store/
+
+# Expo and Metro generated files
+**/.expo/
+**/.expo-shared/
+**/dist/
+**/web-build/
+**/.metro-health-check*
+
+# Generated Android build outputs (keep native source and Gradle files)
+artifacts/mobile/android/.gradle/
+artifacts/mobile/android/.cxx/
+artifacts/mobile/android/build/
+artifacts/mobile/android/app/build/
+artifacts/mobile/android/local.properties
+
+# iOS generated and native project files are not needed for Android build
+**/ios/
+
+# Local environment and secrets
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.sample
+**/*.jks
+**/*.keystore
+**/*.p8
+**/*.p12
+**/*.pfx
+**/*.key
+**/*.mobileprovision
+**/*.pem
+
+# Logs, caches, editor files
+**/*.log
+**/*.tsbuildinfo
+**/.DS_Store
+**/Thumbs.db
+**/Desktop.ini
+**/.idea/
+**/.vscode/
+**/.vercel/
+**/.agents/
+
+# Exclude Git history and non-build documentation from EAS upload
+.git/
+docs/
+
+# Explicitly exclude root Git metadata
+/.git
+/.git/**
+
+# Temporary diagnostic files - do not upload to EAS
+**/installed-makersflow.apk
+**/index.android.bundle
+**/*.bak
+**/*.encoding-backup
+
+# Additional exclusions preserved from workspace .gitignore files
+**/debug.keystore
+**/expo-env.d.ts
+**/*.jsbundle
+**/*.apk
+**/*.orig.*
+**/supabase/.temp/
+**/npm-debug.*
+**/yarn-debug.*
+**/yarn-error.*
+**/pnpm-debug.*

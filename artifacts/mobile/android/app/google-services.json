@@ -14,6 +14,14 @@
       },
       "oauth_client": [
         {
+          "client_id": "708273277845-1jmsicfqlsnt1v3jsreagdfebcstqo8a.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.makersflow.app",
+            "certificate_hash": "f694a89d7430fc619aa19c76acae575e480b53e4"
+          }
+        },
+        {
           "client_id": "708273277845-odd56t5ma558pop3qh8avku9kvp4em9r.apps.googleusercontent.com",
           "client_type": 3
         }
