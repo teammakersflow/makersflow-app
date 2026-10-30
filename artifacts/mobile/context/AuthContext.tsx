@@ -163,7 +163,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (res.success && res.data) {
         const { accessToken, refreshToken, expiresIn, user: backendUser } = res.data;
         await tokenStorage.saveTokens(accessToken, refreshToken);
-        
+
         const domainUser = mapBackendUserToDomain(backendUser);
         setUser(domainUser);
         setSession({ accessToken, refreshToken, expiresIn });
@@ -298,16 +298,97 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }
 
   // ── Placeholders for password/OTP auth (managed via Google OAuth) ─────────
-  async function login(): Promise<{ success: boolean; error?: string }> {
-    return { success: false, error: 'Password authentication is disabled. Please sign in with Google.' };
+  async function login(email: string, password: string): Promise<{ success: boolean; error?: string; profile?: User }> {
+    try {
+      setIsLoading(true);
+
+      const res = await customAuthService.loginWithPassword(email, password);
+
+      if (res.success && res.data) {
+        const { accessToken, refreshToken, expiresIn, user: backendUser } = res.data;
+
+        await tokenStorage.saveTokens(accessToken, refreshToken);
+
+        const domainUser = mapBackendUserToDomain(backendUser);
+        setUser(domainUser);
+        setSession({ accessToken, refreshToken, expiresIn: expiresIn ?? 900 });
+        setIsAuthenticatedLocally(true);
+        setIsOffline(false);
+
+        await profileCache.saveProfile({
+          id: domainUser.id,
+          email: domainUser.email,
+          full_name: domainUser.name,
+          role: domainUser.role,
+          grade: domainUser.grade,
+          school: domainUser.school,
+          avatar_url: domainUser.avatar,
+          age: domainUser.age,
+          phone: domainUser.phone,
+          onboarding_completed: domainUser.onboarding_completed,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        });
+
+        registerForPushNotifications(domainUser.id).catch(() => {});
+
+        setIsLoading(false);
+        return { success: true, profile: domainUser };
+      }
+
+      setIsLoading(false);
+      return { success: false, error: res.message || 'Login failed. Please check your email and password.' };
+    } catch (err: any) {
+      devError('[Auth] Password login error:', err?.message);
+      setIsLoading(false);
+      return { success: false, error: err?.message || 'Login failed. Please check your email and password.' };
+    }
   }
 
-  async function register(): Promise<{ success: boolean; error?: string }> {
-    return { success: false, error: 'Registration is managed via Google Sign-In. Please use Google.' };
+  async function register(
+    name: string,
+    email: string,
+    password: string,
+    _grade?: string,
+    _school?: string,
+    _phone?: string,
+    _age?: number
+  ): Promise<{ success: boolean; needsEmailVerification?: boolean; error?: string }> {
+    try {
+      const response = await customAuthService.registerWithPassword(
+        email,
+        password,
+        name
+      );
+
+      return {
+        success: response.success,
+        error: response.success ? undefined : response.message || 'Registration failed.',
+      };
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Registration failed. Please try again.';
+
+      devError('[Auth] Registration error:', message);
+
+      return { success: false, error: message };
+    }
   }
 
-  async function resetPassword(): Promise<{ success: boolean; error?: string }> {
-    return { success: false, error: 'Password reset is not applicable for Google authenticated accounts.' };
+  async function resetPassword(email: string): Promise<{ success: boolean; error?: string }> {
+    try {
+      await customAuthService.requestPasswordReset(email);
+      return { success: true };
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unable to request a password reset. Please try again.';
+      devError('[Auth] Password reset request failed:', message);
+      return { success: false, error: message };
+    }
   }
 
   async function updatePassword(): Promise<{ success: boolean; error?: string }> {

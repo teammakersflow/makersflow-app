@@ -38,6 +38,14 @@ export interface AuthLoginResponse {
   };
 }
 
+export interface AuthRegisterResponse {
+  success: boolean;
+  message?: string;
+  data: {
+    user: AuthUserResponse;
+  };
+}
+
 export interface AuthRefreshResponse {
   success: boolean;
   message?: string;
@@ -62,10 +70,37 @@ export const customAuthService = {
   /**
    * Authenticate user with Google idToken (POST /auth/google)
    */
+
+  async registerWithPassword(email: string, password: string, fullName: string): Promise<AuthRegisterResponse> {
+    return await apiRequest<AuthRegisterResponse>('/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({email: email.trim().toLowerCase(),password,fullName: fullName.trim(),}),
+    });
+  },
+
+
+  async loginWithPassword(email: string, password: string): Promise<AuthLoginResponse> {
+    return await apiRequest<AuthLoginResponse>('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email: email.trim().toLowerCase(), password }),
+    });
+  },
+
   async loginWithGoogle(idToken: string): Promise<AuthLoginResponse> {
     return await apiRequest<AuthLoginResponse>('/auth/google', {
       method: 'POST',
       body: JSON.stringify({ idToken }),
+    });
+  },
+
+  /**
+   * Request a password-reset email (POST /auth/forgot-password).
+   * The reset link is completed on the MakersFlow website.
+   */
+  async requestPasswordReset(email: string): Promise<{ success: boolean; message?: string }> {
+    return await apiRequest<{ success: boolean; message?: string }>('/auth/forgot-password', {
+      method: 'POST',
+      body: JSON.stringify({ email: email.trim().toLowerCase() }),
     });
   },
 

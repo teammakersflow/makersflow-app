@@ -398,37 +398,9 @@ export default function RegisterScreen() {
     setLoading(false);
 
     if (result.success) {
-      if (result.needsEmailVerification) {
-        // Supabase Confirm Email is ON — signUp returned a user but no session.
-        // Do NOT upload the avatar (no authenticated session → storage RLS would
-        // reject it) and do NOT navigate into the app. Show the verification
-        // prompt instead; the user must verify then sign in normally.
-        if (avatarUri) {
-          try {
-            await AsyncStorage.setItem(
-              `pending_avatar_${email.toLowerCase().trim()}`,
-              avatarUri
-            );
-          } catch (err) {
-            console.error("Failed to save pending avatar:", err);
-          }
-        }
-        setRegisteredEmail(email);
-        setEmailVerificationSent(true);
-        return;
-      }
-
-      // Auto-confirm is ON — a session was created immediately. Proceed as before.
-      if (avatarUri) {
-        try {
-          if (user?.id) {
-            await setProfileAvatar(user.id);
-          }
-        } catch (uploadErr) {
-          console.error("Avatar update failed:", uploadErr);
-        }
-      }
-      router.replace("/(auth)/onboarding");
+      setRegisteredEmail(email.trim().toLowerCase());
+      setEmailVerificationSent(true);
+      return;
     } else {
       setError(result.error || "Registration failed. Please try again.");
     }
@@ -449,15 +421,15 @@ export default function RegisterScreen() {
             <View style={[styles.verifyIconWrap, { backgroundColor: colors.accent }]}>
               <Ionicons name="mail-unread" size={40} color="#0B6FAD" />
             </View>
-            <Text style={[styles.verifyTitle, { color: colors.foreground }]}>Check your email</Text>
+            <Text style={[styles.verifyTitle, { color: colors.foreground }]}>Account created successfully</Text>
             <Text style={[styles.verifyBody, { color: colors.mutedForeground }]}>
-              {"We've sent a verification link to\n"}
+              {"Your account has been created for\n"}
               <Text style={{ color: colors.foreground, fontFamily: "Inter_600SemiBold" }}>
                 {registeredEmail}
               </Text>
             </Text>
             <Text style={[styles.verifyHint, { color: colors.mutedForeground }]}>
-              Please verify your email before signing in. Check your spam folder if you don't see it.
+              You can now sign in using your email and password.
             </Text>
             <Pressable
               style={[styles.verifyBtn, { backgroundColor: "#0B6FAD" }]}

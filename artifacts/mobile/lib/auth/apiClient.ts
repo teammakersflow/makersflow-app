@@ -148,7 +148,7 @@ export async function apiRequest<T = any>(
     clearTimeout(timeoutId);
 
     // Handle 401 Unauthorized (Token Expiry)
-    if (response.status === 401 && !isRetry && !endpoint.includes('/auth/refresh') && !endpoint.includes('/auth/google')) {
+    if (response.status === 401 && !isRetry && !endpoint.includes('/auth/refresh') && !endpoint.includes('/auth/google') && !endpoint.includes('/auth/login')) {
       if (!isRefreshing) {
         isRefreshing = true;
         const newToken = await performTokenRefresh();
@@ -227,4 +227,3 @@ export const apiClient = {
   delete: <T = any>(endpoint: string, options?: RequestInit) =>
     apiRequest<T>(endpoint, { ...options, method: 'DELETE' }),
 };
-
