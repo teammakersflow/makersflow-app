@@ -71,7 +71,7 @@ export default function LearnScreen() {
   const [enrollment, setEnrollment] = useState<any>(null);
   const [isEnrollmentExpired, setIsEnrollmentExpired] = useState(false);
   const [activeTab, setActiveTab] = useState<"overview" | "content">("overview");
-  const [activeModuleId, setActiveModuleId] = useState<string | undefined>(lessonId || moduleId);
+  const [activeModuleId, setActiveModuleId] = useState<string | undefined>(lessonId ? String(lessonId) : undefined);
   const [showResumeModal, setShowResumeModal] = useState(false);
   const [showCompleteModal, setShowCompleteModal] = useState(false);
   const [resumeFromTime, setResumeFromTime] = useState(0);
@@ -211,8 +211,33 @@ export default function LearnScreen() {
           );
           setDownloadedMap((prev) => ({ ...prev, ...map }));
 
-          if (!activeModuleId && flatLessons.length > 0) {
-            setActiveModuleId(lessonId || moduleId || flatLessons[0].id);
+          if (flatLessons.length > 0) {
+            const requestedLesson = lessonId
+              ? flatLessons.find((l: any) => String(l.id) === String(lessonId))
+              : null;
+
+            const requestedModule = moduleId
+              ? modulesData.find((m: any) => String(m.id) === String(moduleId))
+              : null;
+
+            const moduleFirstLessonId = requestedModule?.lessons?.[0]?.id;
+            const requestedIdIsLesson = moduleId
+              ? flatLessons.some((l: any) => String(l.id) === String(moduleId))
+              : false;
+
+            const initialLessonId = requestedLesson?.id
+              ?? (requestedIdIsLesson
+                ? String(moduleId)
+                : moduleFirstLessonId
+                  ? String(moduleFirstLessonId)
+                  : flatLessons[0].id);
+
+            if (
+              initialLessonId &&
+              (!activeModuleId || !flatLessons.some((l: any) => String(l.id) === String(activeModuleId)))
+            ) {
+              setActiveModuleId(String(initialLessonId));
+            }
           }
 
           if (user?.id) {
@@ -269,12 +294,12 @@ export default function LearnScreen() {
     setSignedVideoUrl(null);
     setIsSignedUrlLoading(true);
 
-    apiRequest<{ signedUrl: string; expiresIn: number }>(
+    apiRequest<{ success?: boolean; message?: string; data?: { signedUrl: string; expiresIn: number }; signedUrl?: string; expiresIn?: number }>(
       `/lessons/${activeModuleId}/video`,
     )
       .then((res) => {
         if (!cancelled) {
-          const url = res?.signedUrl ?? null;
+          const url = res?.data?.signedUrl ?? res?.signedUrl ?? null;
           if (!url) {
             console.warn('[LearnScreen] No signedUrl in response for lesson', activeModuleId);
           }
