@@ -375,13 +375,19 @@ export default function CheckoutScreen() {
 
       if (Array.isArray(couriers) && couriers.length > 0) {
         const sorted = couriers
-          .filter((c: any) => typeof c.rate === "number" && c.rate > 0)
-          .sort((a: any, b: any) => a.rate - b.rate);
+          .map((c: any) => ({
+            ...c,
+            parsedRate: Number(c.rate),
+          }))
+          .filter(
+            (c: any) => Number.isFinite(c.parsedRate) && c.parsedRate > 0
+          )
+          .sort((a: any, b: any) => a.parsedRate - b.parsedRate);
         if (sorted.length > 0) {
           const best = sorted[0];
           setShiprocketRate({
             success: true,
-            fee: Math.round(best.rate),
+            fee: Math.round(best.parsedRate),
             courierName: best.courier_name ?? "Shiprocket",
             estimatedDays: best.estimated_delivery_days ? `${best.estimated_delivery_days} days` : (best.etd ?? "3-5 days"),
             source: "shiprocket",
