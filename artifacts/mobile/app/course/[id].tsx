@@ -36,7 +36,7 @@ import { useCart } from "@/context/CartContext";
 import { useFavorites } from "@/context/FavoritesContext";
 import { useRequireAuth } from "@/context/AuthRequireContext";
 import { getCourseById, getCourseModules } from "@/services/courseDataProvider";
-import { enrollInCourse, isEnrolled as checkEnrollment, getEnrollment, isExpired } from "@/services/enrollmentService";
+import { enrollInCourse, getEnrollment, isExpired } from "@/services/enrollmentService";
 import { fetchCourseLessonsProgress } from "@/lib/progressStorage";
 import { fetchCourseReviews, fetchMyReview, upsertReview } from "@/services/reviewService";
 import { parseThumbnailUrls } from "@/lib/thumbnailUtils";
@@ -61,6 +61,8 @@ export default function CourseDetailScreen() {
   const [modules, setModules] = useState<any[]>([]);
   const [lessonsProgress, setLessonsProgress] = useState<any[]>([]);
   const [isEnrolled, setIsEnrolled] = useState(false);
+  const [enrollmentStatusKnown, setEnrollmentStatusKnown] = useState(false);
+  const [enrollmentCheckFailed, setEnrollmentCheckFailed] = useState(false);
   const [enrollment, setEnrollment] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isEnrolling, setIsEnrolling] = useState(false);
@@ -202,8 +204,12 @@ export default function CourseDetailScreen() {
     // Parallelize below-the-fold secondary queries in a single Promise.allSettled batch
     const modulesPromise = getCourseModules(id);
     const reviewsPromise = fetchCourseReviews(id);
-    const enrollmentPromise = user?.id ? checkEnrollment(user.id, id) : Promise.resolve(false);
+    const enrollmentPromise = user?.id ? getEnrollment(user.id, id) : Promise.resolve(null);
     const myReviewPromise = user?.id ? fetchMyReview(user.id, id) : Promise.resolve(null);
+    if (user?.id) {
+      setEnrollmentStatusKnown(false);
+      setEnrollmentCheckFailed(false);
+    }
 
     Promise.allSettled([modulesPromise, reviewsPromise, enrollmentPromise, myReviewPromise]).then(
       async ([modulesRes, reviewsRes, enrollmentRes, myReviewRes]) => {
@@ -247,24 +253,30 @@ export default function CourseDetailScreen() {
           setDraftComment(mine.comment ?? "");
         }
 
-        // 4. Enrollment & Progress (parallelized nested check)
+        // 4. Enrollment & Progress
         if (enrollmentRes.status === 'fulfilled' && user?.id) {
-          const enrolledStatus = Boolean(enrollmentRes.value);
+          const enrollmentData = enrollmentRes.value;
+          const enrolledStatus = Boolean(enrollmentData);
+
+          setEnrollmentStatusKnown(true);
+          setEnrollmentCheckFailed(false);
           setIsEnrolled(enrolledStatus);
+          setEnrollment(enrollmentData);
 
           if (enrolledStatus) {
-            const [progressRes, enrollDetailsRes] = await Promise.allSettled([
+            const progressRes = await Promise.allSettled([
               fetchCourseLessonsProgress(user.id, id),
-              getEnrollment(user.id, id)
             ]);
-            if (cancelledRef.current) return;
-            if (progressRes.status === 'fulfilled') setLessonsProgress(progressRes.value);
-            if (enrollDetailsRes.status === 'fulfilled') setEnrollment(enrollDetailsRes.value);
-          } else {
-            setEnrollment(null);
-          }
-        }
 
+            if (cancelledRef.current) return;
+            if (progressRes[0].status === 'fulfilled') {
+              setLessonsProgress(progressRes[0].value);
+            }
+          }
+        } else if (user?.id && enrollmentRes.status === 'rejected') {
+          console.warn('[CourseDetail] Enrollment status could not be verified:', enrollmentRes.reason);
+          setEnrollmentCheckFailed(true);
+        }
         if (!cancelledRef.current) {
           setIsLoading(false);
         }
@@ -461,13 +473,43 @@ export default function CourseDetailScreen() {
             },
           ]
         );
-      } catch (error) {
+      } catch (error: any) {
         console.error('[CourseDetail] Enrollment error:', error);
-        Alert.alert(
-          "Enrollment Failed",
-          "Something went wrong. Please try again.",
-          [{ text: "OK" }]
-        );
+
+        const status = error?.status ?? error?.data?.statusCode ?? error?.response?.status;
+
+        if (status === 409) {
+          setIsEnrolled(true);
+          setEnrollmentStatusKnown(true);
+          setEnrollmentCheckFailed(false);
+
+          try {
+            const progressData = await fetchCourseLessonsProgress(user.id, course.id);
+            setLessonsProgress(progressData);
+          } catch (progressError) {
+            console.warn('[CourseDetail] Could not refresh progress:', progressError);
+          }
+
+          Alert.alert(
+            "Already Enrolled",
+            `You're already enrolled in "${course.title}". You can continue learning.`,
+            [{
+              text: "Start Learning",
+              onPress: () => {
+                router.push({
+                  pathname: "/course/learn",
+                  params: { courseId: course.id, moduleId: modules[0]?.id || "" }
+                });
+              },
+            }]
+          );
+        } else {
+          Alert.alert(
+            "Enrollment Failed",
+            "Something went wrong. Please try again.",
+            [{ text: "OK" }]
+          );
+        }
       } finally {
         setIsEnrolling(false);
       }
@@ -1091,6 +1133,12 @@ export default function CourseDetailScreen() {
               <Ionicons name="chevron-forward" size={18} color="#FFF" style={{ marginLeft: "auto" }} />
             </View>
           </Pressable>
+        ) : user?.id && !enrollmentStatusKnown ? (
+          <View style={{ paddingVertical: 12, alignItems: 'center' }}>
+            <Text style={{ color: colors.mutedForeground, fontSize: 13, textAlign: 'center' }}>
+              {enrollmentCheckFailed ? 'Unable to verify enrollment. Pull down to refresh.' : 'Checking enrollment...'}
+            </Text>
+          </View>
         ) : (
           <View style={styles.ctaRow}>
             <View style={{ justifyContent: "center" }}>

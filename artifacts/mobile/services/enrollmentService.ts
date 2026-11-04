@@ -1,6 +1,18 @@
 import { apiClient } from '@/lib/auth/apiClient';
 
+const ENROLLMENT_CACHE_TTL_MS = 10000;
+let enrollmentCacheGeneration = 0;
+const enrollmentCache = new Map<string, { data: any[]; timestamp: number }>();
+const enrollmentRequests = new Map<string, Promise<any[]>>();
+
+function clearEnrollmentCache() {
+  enrollmentCacheGeneration += 1;
+  enrollmentCache.clear();
+  enrollmentRequests.clear();
+}
+
 async function invalidateCaches() {
+  clearEnrollmentCache();
   try {
     const { homeRepository } = require('@/repositories/homeRepository');
     const { coursesRepository } = require('@/repositories/coursesRepository');
@@ -25,12 +37,10 @@ export async function enrollInCourse(
   if (!courseId) throw new Error('courseId is required for enrollment');
 
   try {
-    let res: any;
-    try {
-      res = await apiClient.post('/enrollments/free', { course_id: Number(courseId) });
-    } catch {
-      res = await apiClient.post(`/courses/${courseId}/enroll`);
-    }
+    const res = await apiClient.post('/enrollments/free', {
+      course_id: Number(courseId),
+    });
+
     await invalidateCaches();
     return res?.data || res;
   } catch (error: any) {
@@ -43,68 +53,83 @@ export async function enrollInCourse(
  * Fetches all active/valid enrollments for the authenticated student via GET /enrollments/my.
  * Identity is derived purely from JWT.
  */
-export async function fetchEnrolledCourses(_userId?: string) {
-  try {
-    let res: any;
-    try {
-      res = await apiClient.get<any>('/enrollments/my');
-    } catch {
-      res = await apiClient.get<any>('/enrollments/me');
-    }
-    const data = res?.data || res || [];
+export async function fetchEnrolledCourses(userId?: string) {
+  const cacheKey = '__authenticated__';
+  const cached = enrollmentCache.get(cacheKey);
 
+  if (cached && Date.now() - cached.timestamp < ENROLLMENT_CACHE_TTL_MS) {
+    return cached.data;
+  }
+
+  const existingRequest = enrollmentRequests.get(cacheKey);
+  if (existingRequest) return existingRequest;
+
+  const generation = enrollmentCacheGeneration;
+
+  const request = (async () => {
+    const res = await apiClient.get<any>('/enrollments/my');
+    const data = res?.data || res || [];
     const REJECTED_PAYMENT_STATES = ['pending', 'failed', 'cancelled', 'refunded'];
 
-    return (Array.isArray(data) ? data : []).filter((enr: any) => {
+    const enrollments = (Array.isArray(data) ? data : []).filter((enr: any) => {
       if (!enr || !enr.courses) return false;
       if (enr.courses.is_free === true) return true;
       const status = enr.payment_status;
       if (status == null) return true;
       return !REJECTED_PAYMENT_STATES.includes(status);
     });
-  } catch (error: any) {
-    console.warn('[EnrollmentService] fetchEnrolledCourses error, returning empty list:', error);
-    return [];
+
+    if (generation === enrollmentCacheGeneration) {
+      enrollmentCache.set(cacheKey, {
+        data: enrollments,
+        timestamp: Date.now(),
+      });
+    }
+
+    return enrollments;
+  })();
+
+  enrollmentRequests.set(cacheKey, request);
+
+  try {
+    return await request;
+  } finally {
+    if (enrollmentRequests.get(cacheKey) === request) {
+      enrollmentRequests.delete(cacheKey);
+    }
   }
 }
-
 /**
  * Checks if the authenticated student is actively enrolled in a course.
  */
-export async function isEnrolled(_userId?: string, courseId?: string | number): Promise<boolean> {
+export async function isEnrolled(userId?: string, courseId?: string | number): Promise<boolean> {
   if (!courseId) return false;
-  try {
-    const enrollments = await fetchEnrolledCourses(_userId);
-    const match = enrollments.find(
-      (enr: any) => String(enr.course_id) === String(courseId) || String(enr.courses?.id) === String(courseId),
-    );
-    if (!match) return false;
-    return (
-      ['completed', 'free', 'paid'].includes(match.payment_status) ||
-      match.courses?.is_free === true
-    );
-  } catch {
-    return false;
-  }
-}
 
+  const enrollments = await fetchEnrolledCourses(userId);
+  const match = enrollments.find(
+    (enr: any) => String(enr.course_id) === String(courseId) || String(enr.courses?.id) === String(courseId),
+  );
+
+  if (!match) return false;
+
+  return (
+    ['completed', 'free', 'paid'].includes(match.payment_status) ||
+    match.courses?.is_free === true
+  );
+}
 /**
  * Gets enrollment details for the authenticated student and course.
  */
-export async function getEnrollment(_userId?: string, courseId?: string | number) {
+export async function getEnrollment(userId?: string, courseId?: string | number) {
   if (!courseId) return null;
-  try {
-    const enrollments = await fetchEnrolledCourses(_userId);
-    return (
-      enrollments.find(
-        (enr: any) => String(enr.course_id) === String(courseId) || String(enr.courses?.id) === String(courseId),
-      ) || null
-    );
-  } catch {
-    return null;
-  }
-}
 
+  const enrollments = await fetchEnrolledCourses(userId);
+  return (
+    enrollments.find(
+      (enr: any) => String(enr.course_id) === String(courseId) || String(enr.courses?.id) === String(courseId),
+    ) || null
+  );
+}
 export function isExpired(enrollment: any): boolean {
   if (!enrollment || !enrollment.expires_at) return false;
   const expiryDate = new Date(enrollment.expires_at);

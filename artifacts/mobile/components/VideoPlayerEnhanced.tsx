@@ -35,6 +35,7 @@ interface VideoPlayerProps {
   onProgressUpdate?: (currentTime: number, duration: number) => void;
   onComplete?: () => void;
   onLoadingStateChange?: (isLoading: boolean) => void;
+  onRefreshVideoUrl?: () => Promise<string | null>;
 }
 
 export function VideoPlayerEnhanced({
@@ -43,6 +44,7 @@ export function VideoPlayerEnhanced({
   onProgressUpdate,
   onComplete,
   onLoadingStateChange,
+  onRefreshVideoUrl,
 }: VideoPlayerProps) {
   const colors = useColors();
   const [showControls, setShowControls] = useState(true);
@@ -62,14 +64,64 @@ export function VideoPlayerEnhanced({
   const [isStalled, setIsStalled] = useState(false);
   const loadingSince = useRef<number | null>(null);
 
+  const retryCountRef = useRef(0);
+  const lastStatusRef = useRef("");
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const currentVideoUrlRef = useRef(videoUrl);
+  const refreshVideoUrlRef = useRef(onRefreshVideoUrl);
+  const isReplacingSourceRef = useRef(false);
+
+  useEffect(() => {
+    refreshVideoUrlRef.current = onRefreshVideoUrl;
+  }, [onRefreshVideoUrl]);
+
+  const replaceVideoSource = async (): Promise<boolean> => {
+    if (isReplacingSourceRef.current) return false;
+    isReplacingSourceRef.current = true;
+
+    try {
+      let source = currentVideoUrlRef.current;
+
+      if (refreshVideoUrlRef.current) {
+        const freshUrl = await refreshVideoUrlRef.current();
+        if (!freshUrl) {
+          throw new Error("Could not obtain a fresh signed video URL");
+        }
+        source = freshUrl;
+      }
+
+      if (!isMounted.current || !player) return false;
+
+      currentVideoUrlRef.current = source;
+      player.replace(source);
+      loadingSince.current = null;
+      setIsStalled(false);
+      setHasError(false);
+      setIsRetrying(true);
+      return true;
+    } catch (error) {
+      devError("[VideoPlayer] Source refresh/retry failed:", error);
+      if (isMounted.current) {
+        setHasError(true);
+        setIsRetrying(false);
+      }
+      return false;
+    } finally {
+      isReplacingSourceRef.current = false;
+    }
+  };
+
   const handleVideoError = () => {
-    if (retryCount >= 3) {
+    if (retryTimerRef.current) return;
+
+    if (retryCountRef.current >= 3) {
       setHasError(true);
       setIsRetrying(false);
       return;
     }
 
-    const nextRetry = retryCount + 1;
+    const nextRetry = retryCountRef.current + 1;
+    retryCountRef.current = nextRetry;
     setRetryCount(nextRetry);
     setIsRetrying(true);
 
@@ -77,10 +129,11 @@ export function VideoPlayerEnhanced({
 
     devLog(`[VideoPlayer] Scheduling retry ${nextRetry}/3 in ${delay}ms`);
 
-    setTimeout(() => {
-      if (player && isMounted.current) {
+    retryTimerRef.current = setTimeout(() => {
+      retryTimerRef.current = null;
+      if (isMounted.current) {
         devLog(`[VideoPlayer] Executing retry ${nextRetry}/3`);
-        player.replace(videoUrl);
+        void replaceVideoSource();
       }
     }, delay);
   };
@@ -173,6 +226,10 @@ export function VideoPlayerEnhanced({
     isMounted.current = true;
     return () => {
       isMounted.current = false;
+      if (retryTimerRef.current) {
+        clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
     };
   }, []);
 
@@ -218,22 +275,40 @@ export function VideoPlayerEnhanced({
   const prevVideoUrl = useRef(videoUrl);
   useEffect(() => {
     if (!player) return;
+
     if (videoUrl !== prevVideoUrl.current) {
       prevVideoUrl.current = videoUrl;
+      currentVideoUrlRef.current = videoUrl;
       hasEmittedComplete.current = false;
       lastSaveTime.current = 0;
+      lastStatusRef.current = "";
+      retryCountRef.current = 0;
+
+      if (retryTimerRef.current) {
+        clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
+
+      setRetryCount(0);
+      setHasError(false);
+      setIsRetrying(false);
+      loadingSince.current = null;
+      setIsStalled(false);
+
       try {
         player.replace(videoUrl);
         if (initialTime > 30) {
-          // Small delay to let the new source load before seeking
           setTimeout(() => {
-            try { player.currentTime = initialTime; } catch {}
+            try {
+              if (isMounted.current) player.currentTime = initialTime;
+            } catch {}
           }, 300);
         }
       } catch (err) {
         devLog('[VideoPlayer] replace error:', err);
       }
     }
+
     devLog("[VideoPlayer] URL:", videoUrl, "initialTime:", initialTime);
   }, [videoUrl, player]);
 
@@ -314,22 +389,27 @@ export function VideoPlayerEnhanced({
           setIsStalled(false);
         }
 
-        if (status !== lastStatus) {
-          if (status === "readyToPlay" || status === "idle") {
+        if (status !== lastStatusRef.current) {
+          lastStatusRef.current = status;
+
+          if (status === "readyToPlay") {
             devLog(
               "[VideoPlayer] Video ready - Status:",
               status,
               "Duration:",
               durationT
             );
+            retryCountRef.current = 0;
             setRetryCount(0);
             setHasError(false);
             setIsRetrying(false);
           }
+
           if (status === "error") {
             devError("[VideoPlayer] Video error detected");
             handleVideoError();
           }
+
           setLastStatus(status);
         }
 
@@ -669,9 +749,13 @@ export function VideoPlayerEnhanced({
               <Pressable
                 style={[styles.errorBtn, { backgroundColor: colors.primary }]}
                 onPress={() => {
-                  loadingSince.current = null;
-                  setIsStalled(false);
-                  if (player) player.replace(videoUrl);
+                  if (retryTimerRef.current) {
+                    clearTimeout(retryTimerRef.current);
+                    retryTimerRef.current = null;
+                  }
+                  retryCountRef.current = 0;
+                  setRetryCount(0);
+                  void replaceVideoSource();
                 }}
               >
                 <Text style={styles.errorBtnText}>Reconnect</Text>
@@ -709,10 +793,13 @@ export function VideoPlayerEnhanced({
               <Pressable
                 style={[styles.errorBtn, { backgroundColor: colors.primary }]}
                 onPress={() => {
+                  if (retryTimerRef.current) {
+                    clearTimeout(retryTimerRef.current);
+                    retryTimerRef.current = null;
+                  }
+                  retryCountRef.current = 0;
                   setRetryCount(0);
-                  setHasError(false);
-                  setIsRetrying(true);
-                  if (player) player.replace(videoUrl);
+                  void replaceVideoSource();
                 }}
               >
                 <Text style={styles.errorBtnText}>Try Again</Text>

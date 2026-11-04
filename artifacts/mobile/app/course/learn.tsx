@@ -275,14 +275,57 @@ export default function LearnScreen() {
     }
   }, [activeModuleId, isLoading]);
 
-  // Fetch a short-lived signed URL from NestJS whenever the active lesson changes.
-  // activeModuleId is the lesson ID (confirmed: flatLessons maps l.id → id).
-  // The backend (GET /lessons/:id/video) enforces enrollment — we never bypass
-  // this check client-side, and we never fall back to the raw video_url.
+  // Always use the authenticated backend endpoint for protected video URLs.
+  const activeLessonIdRef = useRef(activeModuleId);
+  activeLessonIdRef.current = activeModuleId;
+
+  const fetchSignedVideoUrl = useCallback(async (lessonId: string): Promise<string | null> => {
+    const res = await apiRequest<{
+      success?: boolean;
+      message?: string;
+      data?: { signedUrl: string; expiresIn: number };
+      signedUrl?: string;
+      expiresIn?: number;
+    }>(`/lessons/${lessonId}/video`);
+
+    return res?.data?.signedUrl ?? res?.signedUrl ?? null;
+  }, []);
+
+  // Used by the player when its current signed URL expires or playback fails.
+  const refreshSignedVideoUrl = useCallback(async (lessonId: string): Promise<string | null> => {
+    if (!lessonId || activeLessonIdRef.current !== lessonId) return null;
+
+    try {
+      const url = await fetchSignedVideoUrl(lessonId);
+
+      // Never let a response for an old lesson affect the current player.
+      if (activeLessonIdRef.current !== lessonId) return null;
+
+      if (!url) {
+        console.warn('[LearnScreen] Refresh returned no signed URL for lesson', lessonId);
+      }
+
+      return url;
+    } catch (err: any) {
+      console.warn('[LearnScreen] Signed video URL refresh failed:', err?.message ?? err);
+      return null;
+    }
+  }, [fetchSignedVideoUrl]);
+
+  // Fetch the initial signed URL whenever the active lesson changes.
   useEffect(() => {
     if (!activeModuleId || isLoading) return;
 
-    // Offline playback: downloaded file is already local; no signed URL needed.
+    const selectedLesson = lessons.find(
+      (lesson: any) => String(lesson.id) === String(activeModuleId)
+    ) ?? lessons[0];
+
+    if (!selectedLesson?.videoUrl) {
+      setSignedVideoUrl(null);
+      setIsSignedUrlLoading(false);
+      return;
+    }
+
     const localPath = downloadedMap[activeModuleId];
     if (localPath) {
       setSignedVideoUrl(null);
@@ -294,23 +337,17 @@ export default function LearnScreen() {
     setSignedVideoUrl(null);
     setIsSignedUrlLoading(true);
 
-    apiRequest<{ success?: boolean; message?: string; data?: { signedUrl: string; expiresIn: number }; signedUrl?: string; expiresIn?: number }>(
-      `/lessons/${activeModuleId}/video`,
-    )
-      .then((res) => {
+    fetchSignedVideoUrl(activeModuleId)
+      .then((url) => {
         if (!cancelled) {
-          const url = res?.data?.signedUrl ?? res?.signedUrl ?? null;
           if (!url) {
-            console.warn('[LearnScreen] No signedUrl in response for lesson', activeModuleId);
+            console.warn('[LearnScreen] No signed URL for lesson', activeModuleId);
           }
           setSignedVideoUrl(url);
         }
       })
       .catch((err: any) => {
         if (!cancelled) {
-          // 401 → apiRequest auto-refreshes; reaches here only if session is gone
-          // 403 → not enrolled → do NOT fall back to raw video_url
-          // 404 → lesson has no video
           console.warn('[LearnScreen] Signed video URL fetch failed:', err?.message ?? err);
           setSignedVideoUrl(null);
         }
@@ -322,7 +359,7 @@ export default function LearnScreen() {
     return () => {
       cancelled = true;
     };
-  }, [activeModuleId, isLoading, downloadedMap]);
+  }, [activeModuleId, isLoading, downloadedMap, fetchSignedVideoUrl, lessons]);
 
   const isCourseCompleted = !!enrollment?.completed_at;
   const completedModules = lessonsProgress.filter((p) => p.is_completed).length;
@@ -812,23 +849,35 @@ export default function LearnScreen() {
               );
             }
 
-            // 4. Signed URL unavailable (403 not enrolled, 404 no video, network error).
-            //    Do NOT fall back to activeModule.videoUrl — that would bypass enrollment.
-            return (
-              <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#000', minHeight: 200, paddingHorizontal: 24, gap: 12 }}>
-                <Feather name="lock" size={36} color="#DC2626" />
-                <Text style={{ color: '#fff', fontFamily: 'Inter_600SemiBold', fontSize: 15, textAlign: 'center' }}>
-                  Video unavailable
-                </Text>
-                <Text style={{ color: 'rgba(255,255,255,0.6)', fontFamily: 'Inter_400Regular', fontSize: 13, textAlign: 'center' }}>
-                  Please ensure you are enrolled in this course and try again.
-                </Text>
-              </View>
-            );
-          })()
+            // No video URL is available for this lesson.
+            return null;          })()
         )}
       </View>
 
+      {!isEnrollmentExpired && (activeModule?.description?.trim() || !activeModule?.videoUrl) && (
+        <View style={{ backgroundColor: colors.card, marginHorizontal: 16, marginTop: 12, marginBottom: 12, padding: 16, borderRadius: 12, gap: 10 }}>
+          {activeModule?.description?.trim() ? (
+            <>
+              <Text style={{ color: colors.foreground, fontFamily: 'Inter_600SemiBold', fontSize: 16 }}>
+                Lesson content
+              </Text>
+              <Text style={{ color: colors.mutedForeground, fontFamily: 'Inter_400Regular', fontSize: 14, lineHeight: 22 }}>
+                {activeModule.description.trim()}
+              </Text>
+            </>
+          ) : (
+            <>
+              <Feather name="file-text" size={28} color={colors.mutedForeground} />
+              <Text style={{ color: colors.foreground, fontFamily: 'Inter_600SemiBold', fontSize: 15 }}>
+                Content not available
+              </Text>
+              <Text style={{ color: colors.mutedForeground, fontFamily: 'Inter_400Regular', fontSize: 13 }}>
+                No content available for this lesson yet. Please check back later.
+              </Text>
+            </>
+          )}
+        </View>
+      )}
       {/* Mark Complete Button - Secondary Aqua / Pill h48 */}
       {(() => {
         const isAlreadyComplete = !!(lessonsProgress.find(
