@@ -32,7 +32,6 @@ import { cacheManager } from "@/services/cacheManager";
 import { QUIZZES } from "@/data/mockData";
 import { useColors } from "@/hooks/useColors";
 import { useAuth } from "@/context/AuthContext";
-import { useCart } from "@/context/CartContext";
 import { useFavorites } from "@/context/FavoritesContext";
 import { useRequireAuth } from "@/context/AuthRequireContext";
 import { getCourseById, getCourseModules } from "@/services/courseDataProvider";
@@ -42,7 +41,8 @@ import { fetchCourseReviews, fetchMyReview, upsertReview } from "@/services/revi
 import { parseThumbnailUrls } from "@/lib/thumbnailUtils";
 import { homeRepository } from "@/repositories/homeRepository";
 import { coursesRepository } from "@/repositories/coursesRepository";
-import { productService } from "@/services/productService";
+import { RazorpayWebView, type RazorpayPaymentParams } from "@/components/RazorpayWebView";
+import { createRazorpayOrder, verifyRazorpayPayment } from "@/services/razorpayService";
 import { fetchCourseKit, CourseKitResponse } from "@/services/courseKitService";
 
 export default function CourseDetailScreen() {
@@ -53,7 +53,7 @@ export default function CourseDetailScreen() {
   const id = rawId && rawId !== 'undefined' && rawId !== 'null' ? rawId : undefined;
   const { user } = useAuth();
   const { isFavoriteCourse, toggleFavoriteCourse } = useFavorites();
-  const { addToCart, items: cartItems } = useCart();
+
   const { requireAuth } = useRequireAuth();
 
   const [course, setCourse] = useState<any>(null);
@@ -66,6 +66,9 @@ export default function CourseDetailScreen() {
   const [enrollment, setEnrollment] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isEnrolling, setIsEnrolling] = useState(false);
+  const [showCoursePayment, setShowCoursePayment] = useState(false);
+  const [coursePaymentParams, setCoursePaymentParams] = useState<RazorpayPaymentParams | null>(null);
+  const isCoursePaymentVerifyingRef = useRef(false);
   const [refreshing, setRefreshing] = useState(false);
   const isFavorite = course ? isFavoriteCourse(course.id) : false;
 
@@ -378,6 +381,90 @@ export default function CourseDetailScreen() {
     });
   };
 
+  const handleCoursePaymentSuccess = async (
+    paymentId: string,
+    orderId: string,
+    signature: string
+  ) => {
+    if (isCoursePaymentVerifyingRef.current || !user?.id || !course) return;
+
+    isCoursePaymentVerifyingRef.current = true;
+    setShowCoursePayment(false);
+    setIsEnrolling(true);
+
+    try {
+      const result = await verifyRazorpayPayment({
+        razorpay_order_id: orderId,
+        razorpay_payment_id: paymentId,
+        razorpay_signature: signature,
+      });
+
+      if (!result.success) {
+        Alert.alert(
+          "Payment verification pending",
+          result.message || "Payment may have been received, but verification is not complete. Please contact support before trying another payment."
+        );
+        return;
+      }
+
+      setIsEnrolled(true);
+      setEnrollmentStatusKnown(true);
+      setEnrollmentCheckFailed(false);
+
+      await Promise.all([
+        homeRepository.invalidateProgressCache().catch(() => {}),
+        coursesRepository.invalidateEnrollmentsCache().catch(() => {}),
+      ]);
+
+      try {
+        const enrollmentData = await getEnrollment(user.id, course.id);
+        if (enrollmentData) setEnrollment(enrollmentData);
+
+        const progressData = await fetchCourseLessonsProgress(user.id, course.id);
+        setLessonsProgress(progressData);
+      } catch (refreshError) {
+        console.warn("[CourseDetail] Could not refresh after payment:", refreshError);
+      }
+
+      Alert.alert(
+        "Payment Successful!",
+        `You're enrolled in "${course.title}". Ready to start learning?`,
+        [
+          { text: "View Course", style: "cancel" },
+          {
+            text: "Start Learning",
+            onPress: () => router.push({
+              pathname: "/course/learn",
+              params: { courseId: course.id, moduleId: modules[0]?.id || "" }
+            })
+          }
+        ]
+      );
+    } catch (error: any) {
+      console.error("[CourseDetail] Payment verification error:", error);
+      Alert.alert(
+        "Payment verification pending",
+        "Payment may have been received, but we couldn't confirm it. Please contact support before trying another payment."
+      );
+    } finally {
+      isCoursePaymentVerifyingRef.current = false;
+      setIsEnrolling(false);
+      setCoursePaymentParams(null);
+    }
+  };
+
+  const handleCoursePaymentFailure = (reason: string) => {
+    setShowCoursePayment(false);
+    setCoursePaymentParams(null);
+    setIsEnrolling(false);
+    Alert.alert("Payment Failed", reason || "Your payment could not be completed. Please try again.");
+  };
+
+  const handleCoursePaymentDismiss = () => {
+    setShowCoursePayment(false);
+    setCoursePaymentParams(null);
+    setIsEnrolling(false);
+  };
   const handleEnrollNow = async () => {
     if (!course) return;
     requireAuth(async () => {
@@ -387,59 +474,26 @@ export default function CourseDetailScreen() {
 
       try {
         if (!course.isFree) {
-          const { products } = await productService.getProducts({ limit: 100 });
-          const linkedProduct = products.find((p) => Number(p.course_id) === Number(course.id));
-
-          if (!linkedProduct) {
-            // No linked product row — create a virtual product from the course itself
-            // so the user can still proceed to checkout.
-            const virtualProduct: any = {
-              id: `course_${course.id}`,
-              title: course.title,
-              category: "digital",
-              subcategory: "Courses",
-              price: course.price,
-              originalPrice: course.price,
-              thumbnail: course.thumbnail,
-              description: course.description,
-              rating: 4.8,
-              reviews: 0,
-              inStock: true,
-              features: [],
-              is_course: true,
-              course_id: String(course.id),
-            };
-            if (!cartItems.some((i) => i.product.id === virtualProduct.id)) {
-              addToCart(virtualProduct);
-            }
-            router.push("/store/checkout");
-            return;
-          }
-
-          const productForCart: any = {
-            id: String(linkedProduct.id),
-            title: linkedProduct.title || course.title,
-            category: "digital",
-            subcategory: linkedProduct.subcategory || "Courses",
-            price: Number(linkedProduct.price) || course.price,
-            originalPrice: Number(linkedProduct.originalPrice) || Number(linkedProduct.price) || course.price,
-            thumbnail: linkedProduct.thumbnail || course.thumbnail,
-            description: linkedProduct.description || course.description,
-            rating: 4.8,
-            reviews: 0,
-            inStock: linkedProduct.inStock,
-            features: linkedProduct.features || [],
-            is_course: true,
+          const rzpOrder = await createRazorpayOrder({
+            currency: "INR",
+            receipt: `course_${course.id}_${Date.now()}`,
+            order_type: "course",
             course_id: String(course.id),
-          };
+          });
 
-          if (!cartItems.some((i) => i.product.id === productForCart.id)) {
-            addToCart(productForCart);
-          }
-          router.push("/store/checkout");
+          setCoursePaymentParams({
+            orderId: rzpOrder.id,
+            amount: rzpOrder.amount,
+            currency: rzpOrder.currency,
+            keyId: rzpOrder.key_id,
+            name: user.name || "MakersFlow User",
+            email: user.email || "",
+            phone: user.phone || "",
+            description: `Purchase: ${course.title}`,
+          });
+          setShowCoursePayment(true);
           return;
         }
-
         await enrollInCourse(user.id, course.id, course.isFree);
         await Promise.all([
           homeRepository.invalidateProgressCache().catch(() => {}),
@@ -1168,6 +1222,13 @@ export default function CourseDetailScreen() {
           </View>
         )}
       </View>
+      <RazorpayWebView
+        visible={showCoursePayment}
+        params={coursePaymentParams}
+        onSuccess={handleCoursePaymentSuccess}
+        onFailure={handleCoursePaymentFailure}
+        onDismiss={handleCoursePaymentDismiss}
+      />
     </View>
   );
 }
