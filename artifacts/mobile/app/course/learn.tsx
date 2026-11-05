@@ -380,12 +380,6 @@ export default function LearnScreen() {
     if (!user?.id || !courseId || !activeModule?.id) return;
     const watchPercentage = duration > 0 ? (currentTime / duration) * 100 : 0;
     await upsertLessonProgress(user.id, Number(courseId), Number(activeModule.id), currentTime, watchPercentage);
-    try {
-      const progressData = await fetchCourseLessonsProgress(user.id, Number(courseId));
-      setLessonsProgress(progressData);
-    } catch (e) {
-      console.error(e);
-    }
   }, [user?.id, courseId, activeModule?.id]);
 
   const handleVideoComplete = useCallback(async () => {
@@ -425,6 +419,7 @@ export default function LearnScreen() {
             courseName: course?.title ?? '',
             studentName: user.name ?? '',
             completionDate: new Date().toISOString(),
+            courseId: String(courseId ?? ''),
             level: (course as any)?.level,
             instructor: (course as any)?.instructor,
           },
@@ -559,6 +554,7 @@ export default function LearnScreen() {
   };
 
   const handleWatchLaterToggle = async () => {
+    if (!activeModule?.id || !course) return;
     await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     const wasAdded = !isSaved;
     toggleWatchLater({
@@ -596,6 +592,7 @@ export default function LearnScreen() {
 
   const handleNextLesson = () => {
     setShowCompleteModal(false);
+    if (!activeModule) return;
     const currentIndex = lessons.findIndex((m) => m.id === activeModule.id);
     const nextModule = lessons[currentIndex + 1];
     if (nextModule) {
@@ -652,6 +649,7 @@ export default function LearnScreen() {
               courseName: course?.title ?? '',
               studentName: user.name ?? '',
               completionDate: new Date().toISOString(),
+              courseId: String(courseId ?? ''),
               level: (course as any)?.level,
               instructor: (course as any)?.instructor,
             },
@@ -854,7 +852,7 @@ export default function LearnScreen() {
         )}
       </View>
 
-      {!isEnrollmentExpired && (activeModule?.description?.trim() || !activeModule?.videoUrl) && (
+      {!isEnrollmentExpired && activeModule && (activeModule.description?.trim() || !activeModule.videoUrl) && (
         <View style={{ backgroundColor: colors.card, marginHorizontal: 16, marginTop: 12, marginBottom: 12, padding: 16, borderRadius: 12, gap: 10 }}>
           {activeModule?.description?.trim() ? (
             <>
@@ -1155,7 +1153,7 @@ export default function LearnScreen() {
       {/* Lesson Complete Modal */}
       <LessonCompleteModal
         visible={showCompleteModal}
-        lessonTitle={activeModule.title}
+        lessonTitle={activeModule?.title ?? 'Lesson'}
         hasNextLesson={!!getNextModule()}
         onReplay={handleReplayLesson}
         onNextLesson={handleNextLesson}

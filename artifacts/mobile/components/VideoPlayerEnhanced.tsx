@@ -221,6 +221,36 @@ export function VideoPlayerEnhanced({
     }
   });
 
+
+  // TEMP DIAGNOSTICS: Native Expo Video playback events
+  useEffect(() => {
+    if (!player) return;
+
+    console.warn("[VideoPlayer][DIAG] Player initialized", {
+      status: player.status,
+      playing: player.playing,
+    });
+
+    const statusSubscription = player.addListener("statusChange", (event) => {
+      console.warn("[VideoPlayer][DIAG] Status changed", {
+        status: event.status,
+        oldStatus: event.oldStatus,
+        error: event.error?.message ?? null,
+      });
+    });
+
+    const playingSubscription = player.addListener("playingChange", (event) => {
+      console.warn("[VideoPlayer][DIAG] Playing changed", {
+        isPlaying: event.isPlaying,
+        oldIsPlaying: event.oldIsPlaying,
+      });
+    });
+
+    return () => {
+      statusSubscription.remove();
+      playingSubscription.remove();
+    };
+  }, [player]);
   // Keep track of mounted state
   useEffect(() => {
     isMounted.current = true;
@@ -580,6 +610,11 @@ export function VideoPlayerEnhanced({
     try {
       // Read ground truth from player directly — never from stale React state
       const currentlyPlaying = player.playing;
+      console.warn("[VideoPlayer][DIAG] Play/Pause pressed", {
+        playingBefore: currentlyPlaying,
+        status: player.status,
+        currentTime: player.currentTime,
+      });
       const isAtEnd = duration > 0 && player.currentTime >= duration - 0.5;
 
       if (currentlyPlaying) {
@@ -592,6 +627,10 @@ export function VideoPlayerEnhanced({
           hasEmittedComplete.current = false;
         }
         player.play();
+      console.warn("[VideoPlayer][DIAG] player.play() called", {
+        playingAfter: player.playing,
+        status: player.status,
+      });
         setIsPlaying(true);
         isPlayingRef.current = true;
       }

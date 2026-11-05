@@ -3,6 +3,103 @@ import { apiClient } from '@/lib/auth/apiClient';
 import { getCourseModules } from '@/services/courseDataProvider';
 import { emitSessionExpired, isAuthError } from './sessionEvents';
 
+// Cache progress IDs so playback updates do not repeatedly fetch all course progress.
+const lessonProgressIdCache = new Map<string, string>();
+// Prevent repeated course-progress GETs after temporary API failures.
+const courseProgressLookupRetryAfter = new Map<string, number>();
+const courseProgressLookupInFlight = new Map<string, Promise<boolean>>();
+const pendingLessonProgressResolution = new Set<string>();
+const lessonProgressUpsertInFlight = new Map<string, Promise<void>>();
+const pendingLessonProgressUpdates = new Map<string, { userId: string; courseId: string | number; lessonId: string | number; currentTimeSecs: number; watchPercentage: number }>();
+
+async function lookupCourseProgressIds(
+  userId: string,
+  courseId: string | number,
+): Promise<boolean> {
+  const courseKey = `${userId}:${courseId}`;
+
+  const existingRequest = courseProgressLookupInFlight.get(courseKey);
+  if (existingRequest) return existingRequest;
+
+  const retryAfter = courseProgressLookupRetryAfter.get(courseKey) || 0;
+  if (Date.now() < retryAfter) return false;
+
+  const request = (async () => {
+    try {
+      const response = await apiClient.get<any>(
+        `/lesson-progress/my/course/${Number(courseId)}`,
+      );
+      cacheCourseProgressIds(userId, courseId, response);
+      courseProgressLookupRetryAfter.delete(courseKey);
+      return true;
+    } catch {
+      courseProgressLookupRetryAfter.set(courseKey, Date.now() + 30000);
+      return false;
+    } finally {
+      courseProgressLookupInFlight.delete(courseKey);
+    }
+  })();
+
+  courseProgressLookupInFlight.set(courseKey, request);
+  return request;
+}
+
+function lessonProgressCacheKey(userId: string, courseId: string | number, lessonId: string | number) {
+  return `${userId}:${courseId}:${lessonId}`;
+}
+
+function findLessonProgressId(response: any, lessonId: string | number): string | undefined {
+  const data = response?.data || response;
+
+  if (Array.isArray(data?.lessons)) {
+    const matched = data.lessons.find(
+      (lesson: any) => String(lesson.lesson_id) === String(lessonId),
+    );
+    if (matched?.progress?.id != null) return String(matched.progress.id);
+  }
+
+  if (Array.isArray(data?.lessonsProgress)) {
+    const matched = data.lessonsProgress.find(
+      (progress: any) => String(progress.lesson_id) === String(lessonId),
+    );
+    if (matched?.id != null) return String(matched.id);
+  }
+
+  return undefined;
+}
+
+function findCreatedProgressId(response: any): string | undefined {
+  const data = response?.data || response;
+  const record = data?.progress || data?.lessonProgress || data?.lesson_progress || data;
+  return record?.id != null ? String(record.id) : undefined;
+}
+
+function cacheCourseProgressIds(userId: string, courseId: string | number, response: any) {
+  const data = response?.data || response;
+
+  if (Array.isArray(data?.lessons)) {
+    data.lessons.forEach((lesson: any) => {
+      if (lesson?.lesson_id != null && lesson?.progress?.id != null) {
+        lessonProgressIdCache.set(
+          lessonProgressCacheKey(userId, courseId, lesson.lesson_id),
+          String(lesson.progress.id),
+        );
+      }
+    });
+  }
+
+  if (Array.isArray(data?.lessonsProgress)) {
+    data.lessonsProgress.forEach((progress: any) => {
+      if (progress?.lesson_id != null && progress?.id != null) {
+        lessonProgressIdCache.set(
+          lessonProgressCacheKey(userId, courseId, progress.lesson_id),
+          String(progress.id),
+        );
+      }
+    });
+  }
+}
+
 /**
  * Single source of truth for "how far through a course is this learner".
  *
@@ -226,30 +323,40 @@ export async function markLessonComplete(
  * Uses PATCH /lesson-progress/:id if record exists, or POST /lesson-progress if new.
  * Identity is derived purely from JWT bearer token.
  */
-export async function upsertLessonProgress(
+async function performUpsertLessonProgress(
   userId: string,
   courseId: string | number,
   lessonId: string | number,
   currentTimeSecs: number,
   watchPercentage: number,
-) {
+): Promise<void> {
   try {
     const numCourseId = Number(courseId);
     const numLessonId = Number(lessonId);
+    const cacheKey = lessonProgressCacheKey(userId, numCourseId, numLessonId);
+    const courseKey = `${userId}:${numCourseId}`;
     const isCompleted = watchPercentage >= 90;
 
-    let existingProgressId: string | undefined;
-    try {
-      const res = await apiClient.get<any>(`/lesson-progress/my/course/${numCourseId}`);
-      const data = res?.data || res;
-      if (data && Array.isArray(data.lessons)) {
-        const matched = data.lessons.find((l: any) => String(l.lesson_id) === String(numLessonId));
-        if (matched?.progress?.id) {
-          existingProgressId = String(matched.progress.id);
-        }
+    let existingProgressId = lessonProgressIdCache.get(cacheKey);
+
+    if (!existingProgressId) {
+      const lookupSucceeded = await lookupCourseProgressIds(userId, numCourseId);
+
+      // Never POST when the lookup failed; the record may already exist.
+      if (!lookupSucceeded) return;
+
+      existingProgressId = lessonProgressIdCache.get(cacheKey);
+
+      // A previous POST succeeded but its ID could not be resolved.
+      // Retry lookup after the cooldown instead of creating another record.
+      if (!existingProgressId && pendingLessonProgressResolution.has(cacheKey)) {
+        courseProgressLookupRetryAfter.set(courseKey, Date.now() + 30000);
+        return;
       }
-    } catch {
-      // ignore
+    }
+
+    if (existingProgressId) {
+      pendingLessonProgressResolution.delete(cacheKey);
     }
 
     const payload: Record<string, any> = {
@@ -258,30 +365,55 @@ export async function upsertLessonProgress(
       time_spent_secs: Math.max(0, Math.floor(currentTimeSecs)),
       last_watched_at: new Date().toISOString(),
     };
+
     if (isCompleted) {
       payload.is_completed = true;
     }
 
     if (existingProgressId) {
       await apiClient.patch(`/lesson-progress/${existingProgressId}`, payload);
-    } else {
-      try {
-        await apiClient.post('/lesson-progress', {
-          course_id: numCourseId,
-          lesson_id: numLessonId,
-          ...payload,
-        });
-      } catch (postErr: any) {
-        if (postErr?.status === 409 || postErr?.statusCode === 409) {
-          const res = await apiClient.get<any>(`/lesson-progress/my/course/${numCourseId}`);
-          const data = res?.data || res;
-          if (data && Array.isArray(data.lessons)) {
-            const matched = data.lessons.find((l: any) => String(l.lesson_id) === String(numLessonId));
-            if (matched?.progress?.id) {
-              await apiClient.patch(`/lesson-progress/${matched.progress.id}`, payload);
-            }
-          }
+      return;
+    }
+
+    try {
+      const created = await apiClient.post<any>('/lesson-progress', {
+        course_id: numCourseId,
+        lesson_id: numLessonId,
+        ...payload,
+      });
+
+      const createdId = findCreatedProgressId(created);
+
+      if (createdId) {
+        lessonProgressIdCache.set(cacheKey, createdId);
+        pendingLessonProgressResolution.delete(cacheKey);
+      } else {
+        pendingLessonProgressResolution.add(cacheKey);
+
+        const lookupSucceeded = await lookupCourseProgressIds(userId, numCourseId);
+        const resolvedId = lessonProgressIdCache.get(cacheKey);
+
+        if (resolvedId) {
+          pendingLessonProgressResolution.delete(cacheKey);
+        } else if (lookupSucceeded) {
+          courseProgressLookupRetryAfter.set(courseKey, Date.now() + 30000);
         }
+      }
+    } catch (postErr: any) {
+      if (postErr?.status === 409 || postErr?.statusCode === 409) {
+        pendingLessonProgressResolution.add(cacheKey);
+
+        const lookupSucceeded = await lookupCourseProgressIds(userId, numCourseId);
+        const resolvedId = lessonProgressIdCache.get(cacheKey);
+
+        if (resolvedId) {
+          pendingLessonProgressResolution.delete(cacheKey);
+          await apiClient.patch(`/lesson-progress/${resolvedId}`, payload);
+        } else if (lookupSucceeded) {
+          courseProgressLookupRetryAfter.set(courseKey, Date.now() + 30000);
+        }
+      } else {
+        throw postErr;
       }
     }
   } catch (error: any) {
@@ -290,6 +422,50 @@ export async function upsertLessonProgress(
   }
 }
 
+export function upsertLessonProgress(
+  userId: string,
+  courseId: string | number,
+  lessonId: string | number,
+  currentTimeSecs: number,
+  watchPercentage: number,
+): Promise<void> {
+  const cacheKey = lessonProgressCacheKey(userId, courseId, lessonId);
+
+  const update = { userId, courseId, lessonId, currentTimeSecs, watchPercentage };
+
+  const existingRequest = lessonProgressUpsertInFlight.get(cacheKey);
+  if (existingRequest) {
+    // Keep the newest playback position for processing after the current request.
+    pendingLessonProgressUpdates.set(cacheKey, update);
+    return existingRequest;
+  }
+
+  let request: Promise<void>;
+
+  request = (async () => {
+    let nextUpdate: typeof update | undefined = update;
+
+    while (nextUpdate) {
+      await performUpsertLessonProgress(
+        nextUpdate.userId,
+        nextUpdate.courseId,
+        nextUpdate.lessonId,
+        nextUpdate.currentTimeSecs,
+        nextUpdate.watchPercentage,
+      );
+
+      nextUpdate = pendingLessonProgressUpdates.get(cacheKey);
+      pendingLessonProgressUpdates.delete(cacheKey);
+    }
+  })().finally(() => {
+    if (lessonProgressUpsertInFlight.get(cacheKey) === request) {
+      lessonProgressUpsertInFlight.delete(cacheKey);
+    }
+  });
+
+  lessonProgressUpsertInFlight.set(cacheKey, request);
+  return request;
+}
 /**
  * Fetches course-level progress via GET /lesson-progress/my/course/:courseId
  */
@@ -325,12 +501,13 @@ export async function fetchCourseProgress(
  * Fetches per-lesson progress for a course via GET /lesson-progress/my/course/:courseId
  */
 export async function fetchCourseLessonsProgress(
-  _userId: string,
+  userId: string,
   courseId: string | number,
 ) {
   try {
     const res = await apiClient.get<any>(`/lesson-progress/my/course/${courseId}`);
     const data = res?.data || res;
+    cacheCourseProgressIds(userId, courseId, data);
 
     if (data && Array.isArray(data.lessons)) {
       return data.lessons
