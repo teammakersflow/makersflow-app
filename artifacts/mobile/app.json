@@ -2,7 +2,7 @@
   "expo": {
     "name": "MAKERSFLOW",
     "slug": "mobile",
-    "version": "1.0.7",
+    "version": "1.0.8",
     "orientation": "portrait",
     "icon": "./assets/images/logos/icon.png",
     "scheme": "makersflow",
