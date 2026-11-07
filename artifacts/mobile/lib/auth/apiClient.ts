@@ -57,14 +57,18 @@ export class ApiError extends Error {
 }
 
 let isRefreshing = false;
-let refreshSubscribers: Array<(newToken: string | null) => void> = [];
+let refreshSubscribers: Array<
+  (newToken: string | null, error?: unknown) => void
+> = [];
 
-function subscribeTokenRefresh(cb: (newToken: string | null) => void) {
+function subscribeTokenRefresh(
+  cb: (newToken: string | null, error?: unknown) => void
+) {
   refreshSubscribers.push(cb);
 }
 
-function onRefreshed(newToken: string | null) {
-  refreshSubscribers.map((cb) => cb(newToken));
+function onRefreshed(newToken: string | null, error?: unknown) {
+  refreshSubscribers.forEach((cb) => cb(newToken, error));
   refreshSubscribers = [];
 }
 
@@ -73,6 +77,7 @@ function onRefreshed(newToken: string | null) {
  */
 async function performTokenRefresh(): Promise<string | null> {
   const refreshToken = await tokenStorage.getRefreshToken();
+
   if (!refreshToken) {
     await tokenStorage.clearTokens();
     emitSessionExpired();
@@ -87,30 +92,41 @@ async function performTokenRefresh(): Promise<string | null> {
       body: JSON.stringify({ refreshToken }),
     });
 
-    if (!response.ok) {
+    if (response.status === 401) {
       await tokenStorage.clearTokens();
       emitSessionExpired();
-      return null;
+      throw new ApiError(401, 'Refresh token is invalid. Please log in again.');
+    }
+
+    if (!response.ok) {
+      throw new ApiError(
+        response.status,
+        `Token refresh failed with status ${response.status}. Saved credentials were preserved.`
+      );
     }
 
     const payload = await response.json();
     const data = payload?.data || payload;
-
     const newAccessToken = data?.accessToken;
-    const nextRefreshToken = data?.refreshToken || refreshToken;
+    const newRefreshToken = data?.refreshToken || refreshToken;
 
-    if (newAccessToken && nextRefreshToken) {
-      await tokenStorage.saveTokens(newAccessToken, nextRefreshToken);
-      return newAccessToken;
+    if (!newAccessToken) {
+      throw new ApiError(502, 'Token refresh returned an invalid response.');
     }
 
-    await tokenStorage.clearTokens();
-    emitSessionExpired();
-    return null;
-  } catch {
-    await tokenStorage.clearTokens();
-    emitSessionExpired();
-    return null;
+    await tokenStorage.saveTokens(newAccessToken, newRefreshToken);
+    return newAccessToken;
+  } catch (error) {
+    if (error instanceof ApiError) {
+      throw error;
+    }
+
+    throw new ApiError(
+      0,
+      error instanceof Error
+        ? `Token refresh network error: ${error.message}`
+        : 'Token refresh network error. Saved credentials were preserved.'
+    );
   }
 }
 
@@ -151,24 +167,41 @@ export async function apiRequest<T = any>(
     if (response.status === 401 && !isRetry && !endpoint.includes('/auth/refresh') && !endpoint.includes('/auth/google') && !endpoint.includes('/auth/login')) {
       if (!isRefreshing) {
         isRefreshing = true;
-        const newToken = await performTokenRefresh();
-        isRefreshing = false;
-        onRefreshed(newToken);
+
+        let newToken: string | null = null;
+        let refreshError: unknown = null;
+
+        try {
+          newToken = await performTokenRefresh();
+        } catch (error) {
+          refreshError = error;
+        } finally {
+          isRefreshing = false;
+          onRefreshed(newToken, refreshError);
+        }
+
+        if (refreshError) {
+          throw refreshError;
+        }
 
         if (!newToken) {
           throw new ApiError(401, 'Session expired. Please log in again.');
         }
 
-        // Retry original request with new access token
         return apiRequest<T>(endpoint, options, true);
       } else {
-        // Queue request while refresh is in progress
         return new Promise<T>((resolve, reject) => {
-          subscribeTokenRefresh(async (newToken) => {
+          subscribeTokenRefresh(async (newToken, error) => {
+            if (error) {
+              reject(error);
+              return;
+            }
+
             if (!newToken) {
               reject(new ApiError(401, 'Session expired. Please log in again.'));
               return;
             }
+
             try {
               const retryResult = await apiRequest<T>(endpoint, options, true);
               resolve(retryResult);
@@ -179,7 +212,6 @@ export async function apiRequest<T = any>(
         });
       }
     }
-
     if (!response.ok) {
       const errorData = await response.json().catch(() => null);
       throw new ApiError(

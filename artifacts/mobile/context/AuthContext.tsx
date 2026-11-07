@@ -1,4 +1,9 @@
 import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
+import NetInfo from '@react-native-community/netinfo';
+import { useNetwork } from '@/context/NetworkContext';
+import { Alert } from 'react-native';
+import { router } from 'expo-router';
+import { emitSessionExpired, onSessionExpired } from '@/lib/sessionEvents';
 import { tokenStorage } from '@/lib/auth/tokenStorage';
 import { customAuthService } from '@/lib/auth/customAuthService';
 import { GoogleAuthProvider } from '@/lib/auth/authProviders';
@@ -6,6 +11,7 @@ import { mapBackendUserToDomain, CustomSession, Profile } from '@/types/auth';
 import { profileCache } from '@/services/profileCache';
 import { homeRepository } from '@/repositories/homeRepository';
 import { coursesRepository } from '@/repositories/coursesRepository';
+import { clearEnrollmentCache } from '@/services/enrollmentService';
 import { registerForPushNotifications, unregisterPushToken } from '@/lib/pushNotifications';
 
 const devLog = (...args: any[]) => {
@@ -82,6 +88,7 @@ export function buildUser(
 const AuthContext = createContext<AuthContextType | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const { isInternetReachable } = useNetwork();
   const [user, setUser] = useState<User | null>(null);
   const [session, setSession] = useState<CustomSession | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -95,47 +102,102 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const accessToken = await tokenStorage.getAccessToken();
       const refreshToken = await tokenStorage.getRefreshToken();
 
+      // A complete pair of saved tokens is required for authenticated access.
       if (!accessToken || !refreshToken) {
+        await Promise.allSettled([
+          tokenStorage.clearTokens(),
+          profileCache.clearProfile(),
+          homeRepository.clearUserCache(),
+          coursesRepository.clearUserCache(),
+          Promise.resolve().then(() => clearEnrollmentCache()),
+        ]);
+
         setUser(null);
         setSession(null);
-        setIsLoading(false);
-        setAuthInitialized(true);
+        setIsAuthenticatedLocally(false);
+        setIsOffline(false);
         return;
       }
 
       setIsAuthenticatedLocally(true);
 
       const response = await customAuthService.getCurrentUser();
+
       if (response.success && response.data) {
         const cachedProfile = await profileCache.loadProfile();
-        const domainUser = mapBackendUserToDomain(response.data, cachedProfile);
+
+        // The API client may have refreshed the access token during GET /auth/me.
+        const latestAccessToken = await tokenStorage.getAccessToken();
+        const latestRefreshToken = await tokenStorage.getRefreshToken();
+
+        if (!latestAccessToken || !latestRefreshToken) {
+          emitSessionExpired();
+          return;
+        }
+
+        const domainUser = mapBackendUserToDomain(
+          response.data,
+          cachedProfile,
+        );
+
         setUser(domainUser);
-        setSession({ accessToken, refreshToken, expiresIn: 900 });
+        setSession({
+          accessToken: latestAccessToken,
+          refreshToken: latestRefreshToken,
+          expiresIn: 900,
+        });
         setIsOffline(false);
+        setIsAuthenticatedLocally(true);
       } else {
-        await tokenStorage.clearTokens();
-        setUser(null);
-        setSession(null);
-        setIsAuthenticatedLocally(false);
+        throw new Error('Session validation returned an unsuccessful response.');
       }
     } catch (err: any) {
       devError('[Auth] Session restore error:', err?.message);
-      // Attempt to load cached profile for offline continuity
-      const cachedProfile = await profileCache.loadProfile();
-      if (cachedProfile) {
-        setIsOffline(true);
-        setUser(mapBackendUserToDomain({
-          id: cachedProfile.id,
-          name: cachedProfile.full_name || 'User',
-          email: cachedProfile.email,
-          profileImage: cachedProfile.avatar_url,
-          role: cachedProfile.role || 'student',
-        }, cachedProfile));
-      } else {
-        await tokenStorage.clearTokens();
+
+      // A confirmed 401 must never restore a cached authenticated user.
+      if (err?.status === 401) {
         setUser(null);
         setSession(null);
         setIsAuthenticatedLocally(false);
+        setIsOffline(false);
+        emitSessionExpired();
+        return;
+      }
+
+      // Preserve cached access, but only report offline when NetInfo confirms
+      // that the device has no network connection.
+      let confirmedOffline = false;
+      try {
+        const networkState = await NetInfo.fetch();
+        confirmedOffline = networkState.isInternetReachable === false;
+      } catch (networkError) {
+        devLog('[Auth] Could not confirm network state:', networkError);
+      }
+
+      const cachedProfile = await profileCache.loadProfile();
+
+      if (cachedProfile?.id && cachedProfile?.email) {
+        setIsOffline(confirmedOffline);
+        setIsAuthenticatedLocally(true);
+        setSession(null);
+
+        setUser(
+          mapBackendUserToDomain(
+            {
+              id: cachedProfile.id,
+              name: cachedProfile.full_name || 'User',
+              email: cachedProfile.email,
+              profileImage: cachedProfile.avatar_url,
+              role: cachedProfile.role || 'student',
+            },
+            cachedProfile,
+          ),
+        );
+      } else {
+        setUser(null);
+        setSession(null);
+        setIsAuthenticatedLocally(false);
+        setIsOffline(false);
       }
     } finally {
       setIsLoading(false);
@@ -146,6 +208,50 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     restoreSession();
   }, [restoreSession]);
+  // Clear stale offline mode only when internet access is confirmed.
+  useEffect(() => {
+    if (isInternetReachable === true) {
+      setIsOffline(false);
+    }
+  }, [isInternetReachable]);
+  // Handle expired sessions centrally, including errors raised outside the UI.
+  useEffect(() => {
+    return onSessionExpired(() => {
+      setUser(null);
+      setSession(null);
+      setIsAuthenticatedLocally(false);
+      setIsOffline(false);
+      setIsLoading(false);
+
+      void (async () => {
+        const results = await Promise.allSettled([
+          tokenStorage.clearTokens(),
+          profileCache.clearProfile(),
+          homeRepository.clearUserCache(),
+          coursesRepository.clearUserCache(),
+          Promise.resolve().then(() => clearEnrollmentCache()),
+        ]);
+
+        results.forEach((result) => {
+          if (result.status === 'rejected') {
+            devError('[Auth] Session cleanup error:', result.reason);
+          }
+        });
+      })();
+
+      Alert.alert(
+        'Session expired',
+        'Your session has expired. Please log in again to continue.',
+        [
+          { text: 'Keep Watching', style: 'cancel' },
+          {
+            text: 'Log In',
+            onPress: () => router.replace('/(auth)/login'),
+          },
+        ],
+      );
+    });
+  }, []);
 
   // ── Login with Google ───────────────────────────────────────────────────
   async function loginWithGoogle(): Promise<{ success: boolean; error?: string; profile?: User }> {
@@ -162,6 +268,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const res = await customAuthService.loginWithGoogle(credentials.idToken);
       if (res.success && res.data) {
         const { accessToken, refreshToken, expiresIn, user: backendUser } = res.data;
+        clearEnrollmentCache();
         await tokenStorage.saveTokens(accessToken, refreshToken);
 
         const domainUser = mapBackendUserToDomain(backendUser);
@@ -205,6 +312,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   async function logout(): Promise<void> {
     try {
       setIsLoading(true);
+      clearEnrollmentCache();
       // 1. Revoke server session while access token is valid
       await customAuthService.logout().catch(() => {});
 
@@ -218,6 +326,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       await profileCache.clearProfile();
       await homeRepository.clearUserCache();
       await coursesRepository.clearUserCache();
+
 
       setUser(null);
       setSession(null);
@@ -307,6 +416,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (res.success && res.data) {
         const { accessToken, refreshToken, expiresIn, user: backendUser } = res.data;
 
+        clearEnrollmentCache();
         await tokenStorage.saveTokens(accessToken, refreshToken);
 
         const domainUser = mapBackendUserToDomain(backendUser);

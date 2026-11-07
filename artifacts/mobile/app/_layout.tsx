@@ -42,7 +42,7 @@ const queryClient = new QueryClient();
 
 function RootLayoutNav() {
   const colors = useColors();
-  const { isConnected } = useNetwork();
+  const { isInternetReachable, refreshNetwork } = useNetwork();
   const { user, isLoading: isAuthLoading } = useAuth();
   
   const [hasEverLoaded, setHasEverLoaded] = React.useState<boolean | null>(null);
@@ -88,23 +88,45 @@ function RootLayoutNav() {
   }, [fontsLoaded, fontError]);
 
   useEffect(() => {
-    AsyncStorage.getItem("app_has_ever_loaded").then((val) => {
-      setHasEverLoaded(val === "true");
-    });
+    let isActive = true;
+
+    AsyncStorage.getItem("app_has_ever_loaded")
+      .then((val) => {
+        if (isActive) {
+          setHasEverLoaded(val === "true");
+        }
+      })
+      .catch((error) => {
+        console.warn("[Startup] Failed to read app launch state:", error);
+        if (isActive) {
+          setHasEverLoaded(true);
+        }
+      });
+
+    return () => {
+      isActive = false;
+    };
   }, []);
 
   useEffect(() => {
-    if (fontsLoaded && isConnected && !isAuthLoading && hasEverLoaded === false) {
-      AsyncStorage.setItem("app_has_ever_loaded", "true");
+    if (fontsLoaded && isInternetReachable === true && !isAuthLoading && hasEverLoaded === false) {
       setHasEverLoaded(true);
+
+      void AsyncStorage.setItem("app_has_ever_loaded", "true").catch((error) => {
+        console.warn("[Startup] Failed to save app launch state:", error);
+      });
     }
-  }, [fontsLoaded, isConnected, isAuthLoading, hasEverLoaded]);
+  }, [fontsLoaded, isInternetReachable, isAuthLoading, hasEverLoaded]);
 
   const handleRetry = async () => {
     setIsChecking(true);
-    setTimeout(() => {
+    try {
+      await refreshNetwork();
+    } catch (error) {
+      console.warn("[Startup] Network refresh failed:", error);
+    } finally {
       setIsChecking(false);
-    }, 1500);
+    }
   };
 
   if (!fontsLoaded || hasEverLoaded === null) {
@@ -112,9 +134,9 @@ function RootLayoutNav() {
   }
 
   // Level 1: startup failure condition
-  // isConnected === null means "checking" — don't show offline screen yet
+  // isInternetReachable === null means "checking" - don't show offline screen yet
   const showStartupOfflineScreen = 
-    isConnected === false && // explicit false, not null (null = still checking)
+    isInternetReachable === false && // explicit false, not null (null = still checking)
     !isAuthLoading && 
     !user && 
     hasEverLoaded === false;

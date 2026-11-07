@@ -32,7 +32,6 @@ import { getCourseById, getCourseModules } from "@/services/courseDataProvider";
 import { markLessonComplete, upsertLessonProgress, fetchCourseLessonsProgress } from "@/lib/progressStorage";
 import { apiRequest } from "@/lib/auth/apiClient";
 import { getEnrollment, isExpired, completeCourse } from "@/services/enrollmentService";
-import { onSessionExpired } from "@/lib/sessionEvents";
 import { ActivityIndicator } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { fetchMyReview, upsertReview } from "@/services/reviewService";
@@ -107,7 +106,7 @@ export default function LearnScreen() {
     { id: string; title: string; url: string; type: string | null; size_bytes?: number | null }[]
   >([]);
   const [lessonNotes, setLessonNotes] = useState<string[]>([]);
-  
+
   useEffect(() => {
     if (!activeModuleId || isNaN(Number(activeModuleId))) {
       setLessonResources([]);
@@ -149,19 +148,6 @@ export default function LearnScreen() {
     })();
   }, [activeModuleId]);
 
-  useEffect(() => {
-    const unsubscribe = onSessionExpired(() => {
-      Alert.alert(
-        "Session expired",
-        "Your session has expired, so your progress can't be saved. Please log in again to continue.",
-        [
-          { text: "Keep Watching", style: "cancel" },
-          { text: "Log In", onPress: () => router.replace("/(auth)/login") },
-        ],
-      );
-    });
-    return unsubscribe;
-  }, []);
 
   useEffect(() => {
     async function loadData() {
@@ -397,37 +383,43 @@ export default function LearnScreen() {
 
     const completedCount = updatedProgress.filter((p) => p.is_completed).length;
     if (totalLessons > 0 && completedCount >= totalLessons) {
-      if (!enrollment?.completed_at) {
+      let completedEnrollment = enrollment;
+      if (!completedEnrollment?.completed_at) {
         try {
           await completeCourse(user.id, Number(courseId));
-          const enrollData = await getEnrollment(user.id, Number(courseId));
-          setEnrollment(enrollData);
+          completedEnrollment = await getEnrollment(user.id, Number(courseId));
+          setEnrollment(completedEnrollment);
         } catch (e) {
           console.error('[CompleteCourse] error:', e);
         }
       }
-      // Self-issue certificate on NestJS backend
-      issueCertificate(Number(courseId)).catch(() => {});
+      try {
+        const issuedCertificate = await issueCertificate(Number(courseId));
+        if (!issuedCertificate) { throw new Error('Certificate issuance returned no certificate.'); }
 
-      const certKey = `@cert_shown:${user.id}:${courseId}`;
-      const alreadyShown = await AsyncStorage.getItem(certKey);
-      if (!alreadyShown) {
-        await AsyncStorage.setItem(certKey, 'true');
-        router.push({
-          pathname: '/certificate',
-          params: {
-            courseName: course?.title ?? '',
-            studentName: user.name ?? '',
-            completionDate: new Date().toISOString(),
-            courseId: String(courseId ?? ''),
-            level: (course as any)?.level,
-            instructor: (course as any)?.instructor,
-          },
-        });
-        return;
+        const certKey = `@cert_shown:${user.id}:${courseId}`;
+        const alreadyShown = await AsyncStorage.getItem(certKey);
+        if (!alreadyShown) {
+          await AsyncStorage.setItem(certKey, 'true');
+          router.push({
+            pathname: '/certificate',
+            params: {
+              courseName: course?.title ?? '',
+              studentName: user.name ?? '',
+              completionDate: completedEnrollment?.completed_at ?? enrollment?.completed_at ?? issuedCertificate?.issued_at ?? '',
+              courseId: String(courseId ?? ''),
+                certNumber: issuedCertificate?.certificate_number ?? '',
+              level: (course as any)?.level,
+              instructor: (course as any)?.instructor,
+            },
+          });
+          return;
+        }
+
+      } catch (certificateError) {
+        console.error('[Certificate] issuance/display failed:', certificateError);
       }
     }
-
     setShowCompleteModal(true);
   }, [user?.id, courseId, activeModule?.id, totalLessons, enrollment?.completed_at, course?.title, lessons]);
 
@@ -524,7 +516,13 @@ export default function LearnScreen() {
     setDownloadProgress(0);
 
     try {
-      const savedPath = await downloadLessonVideo(target.id, target.videoUrl, (pct) => {
+      const signedUrl = await fetchSignedVideoUrl(String(target.id));
+
+      if (!signedUrl) {
+        throw new Error('Could not obtain a secure video download URL. Please try again.');
+      }
+
+      const savedPath = await downloadLessonVideo(target.id, signedUrl, (pct) => {
         setDownloadProgress(pct);
       });
 
@@ -630,34 +628,42 @@ export default function LearnScreen() {
 
       const completedCount = updatedProgress.filter((p) => p.is_completed).length;
       if (totalLessons > 0 && completedCount >= totalLessons) {
-        if (!enrollment?.completed_at) {
+        let completedEnrollment = enrollment;
+        if (!completedEnrollment?.completed_at) {
           try {
             await completeCourse(user.id, courseId);
-            const enrollData = await getEnrollment(user.id, courseId);
-            setEnrollment(enrollData);
+            completedEnrollment = await getEnrollment(user.id, courseId);
+            setEnrollment(completedEnrollment);
           } catch (e) {
             console.error('[CompleteCourse] error:', e);
           }
         }
-        const certKey = `@cert_shown:${user.id}:${courseId}`;
-        const alreadyShown = await AsyncStorage.getItem(certKey);
-        if (!alreadyShown) {
-          await AsyncStorage.setItem(certKey, 'true');
-          router.push({
-            pathname: '/certificate',
-            params: {
-              courseName: course?.title ?? '',
-              studentName: user.name ?? '',
-              completionDate: new Date().toISOString(),
-              courseId: String(courseId ?? ''),
-              level: (course as any)?.level,
-              instructor: (course as any)?.instructor,
-            },
-          });
-          return;
+        try {
+          const issuedCertificate = await issueCertificate(Number(courseId));
+          if (!issuedCertificate) { throw new Error('Certificate issuance returned no certificate.'); }
+          const certKey = `@cert_shown:${user.id}:${courseId}`;
+          const alreadyShown = await AsyncStorage.getItem(certKey);
+          if (!alreadyShown) {
+            await AsyncStorage.setItem(certKey, 'true');
+            router.push({
+              pathname: '/certificate',
+              params: {
+                courseName: course?.title ?? '',
+                studentName: user.name ?? '',
+                completionDate: completedEnrollment?.completed_at ?? enrollment?.completed_at ?? issuedCertificate?.issued_at ?? '',
+                courseId: String(courseId ?? ''),
+                certNumber: issuedCertificate?.certificate_number ?? '',
+                level: (course as any)?.level,
+                instructor: (course as any)?.instructor,
+              },
+            });
+            return;
+          }
+
+        } catch (certificateError) {
+          console.error('[Certificate] issuance/display failed:', certificateError);
         }
       }
-
       setShowCompleteModal(true);
     } catch (e) {
       console.error('[markComplete] error:', e);
@@ -697,12 +703,12 @@ export default function LearnScreen() {
     const modProgress = lessonsProgress.find((p) => String(p.lesson_id) === module.id);
     const isCompleted = modProgress?.is_completed || false;
     const isCurrent = activeModuleId === module.id;
-    
+
     const previousModule = lessons[index - 1];
     const prevProgress = previousModule ? lessonsProgress.find((p) => String(p.lesson_id) === previousModule.id) : null;
     const canAccess = index === 0 || !previousModule || prevProgress?.is_completed;
     const isLocked = !canAccess;
-    
+
     return { isCompleted, isCurrent, isLocked };
   };
 
@@ -1178,7 +1184,7 @@ const styles = StyleSheet.create({
   downloadBtn: { width: 44, height: 44, borderRadius: 22, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(11, 111, 173, 0.08)" },
   shareBtn: { width: 44, height: 44, borderRadius: 22, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(11, 111, 173, 0.08)" },
   headerTitle: { flex: 1, fontSize: 17, fontFamily: "Fredoka_700Bold", textAlign: "center" },
-  
+
   courseHeader: {
     paddingHorizontal: 16,
     paddingVertical: 10,
@@ -1275,7 +1281,7 @@ const styles = StyleSheet.create({
   tabs: { flexDirection: "row", borderBottomWidth: 1 },
   tab: { flex: 1, paddingVertical: 14, alignItems: "center", borderBottomWidth: 2, borderBottomColor: "transparent" },
   tabText: { fontSize: 14 },
-  
+
   moduleList: { padding: 16, gap: 10 },
   modItem: {
     flexDirection: "row",

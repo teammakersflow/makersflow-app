@@ -30,7 +30,6 @@ import { notificationService } from "@/services/notificationService";
 import { announcementService } from "@/services/announcementService";
 import { getCourseModules } from "@/services/courseDataProvider";
 import { completeCourse, fetchEnrolledCourses } from "@/services/enrollmentService";
-import { issueCertificate } from "@/services/certificateService";
 import { fetchCourseProgress } from "@/lib/progressStorage";
 import { ProductCard } from "@/components/ProductCard";
 import { CertificateSkeleton, WishlistSkeleton } from "@/components/SkeletonLoader";
@@ -175,7 +174,6 @@ export default function ProfileScreen() {
             if (prog.total > 0 && prog.completed >= prog.total) {
               // Auto-persist completed_at to DB so future queries find it on the enrollment row
               completeCourse(user.id, courseId).catch(() => {});
-              issueCertificate(courseId).catch(() => {});
               results.push({
                 courseId,
                 courseTitle,

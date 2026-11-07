@@ -15,20 +15,35 @@ export interface Certificate {
  */
 export async function issueCertificate(courseId: number | string): Promise<Certificate | null> {
   const numericCourseId = Number(courseId);
-  if (isNaN(numericCourseId)) return null;
+  if (!Number.isFinite(numericCourseId) || numericCourseId <= 0) return null;
 
   try {
+    const existingCertificates = await fetchMyCertificatesStrict();
+    const existing = existingCertificates.find(
+      (certificate) => Number(certificate.course_id) === numericCourseId
+    );
+
+    if (existing) return existing;
+
     const res = await apiRequest<any>('/certificates/me', {
       method: 'POST',
       body: JSON.stringify({ course_id: numericCourseId }),
     });
+
     return res?.data ?? res;
   } catch (err: any) {
-    // 409 Conflict means already issued on backend, retrieve existing
     if (err?.status === 409 || err?.statusCode === 409) {
-      const list = await fetchMyCertificates();
-      return list.find((c) => Number(c.course_id) === numericCourseId) ?? null;
+      try {
+        const certificates = await fetchMyCertificatesStrict();
+        return certificates.find(
+          (certificate) => Number(certificate.course_id) === numericCourseId
+        ) ?? null;
+      } catch (fetchError) {
+        console.warn('[certificateService] Could not retrieve existing certificate:', fetchError);
+        return null;
+      }
     }
+
     console.warn('[certificateService] issueCertificate error:', err?.message || err);
     return null;
   }
@@ -37,6 +52,14 @@ export async function issueCertificate(courseId: number | string): Promise<Certi
 /**
  * Fetches all issued certificates for the authenticated student via NestJS GET /certificates/me.
  */
+export async function fetchMyCertificatesStrict(): Promise<Certificate[]> {
+  const res = await apiRequest<any>('/certificates/me');
+  const data = Array.isArray(res) ? res : res?.data;
+  if (!Array.isArray(data)) {
+    throw new Error('Invalid certificate list response.');
+  }
+  return data;
+}
 export async function fetchMyCertificates(): Promise<Certificate[]> {
   try {
     const res = await apiRequest<any>('/certificates/me');

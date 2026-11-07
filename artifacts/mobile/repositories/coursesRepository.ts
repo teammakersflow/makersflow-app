@@ -209,12 +209,12 @@ export const coursesRepository = {
     }
 
     try {
-      const catalog = await fetchCatalog().catch(() => []);
+      const catalog = await fetchCatalog();
       cacheManager.write(STORAGE_KEYS.CACHED_COURSES_CATALOG, catalog);
 
       let enrollments: EnrolledCourseDetail[] = [];
       if (userId) {
-        enrollments = await fetchEnrollments(userId).catch(() => []);
+        enrollments = await fetchEnrollments(userId);
         cacheManager.write(STORAGE_KEYS.CACHED_COURSES_ENROLLMENTS, enrollments);
       }
 

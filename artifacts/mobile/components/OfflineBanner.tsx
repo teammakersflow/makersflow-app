@@ -6,7 +6,7 @@ import { useNetwork } from "@/context/NetworkContext";
 
 export function OfflineBanner() {
   const insets = useSafeAreaInsets();
-  const { isConnected } = useNetwork();
+  const { isInternetReachable } = useNetwork();
   const [statusText, setStatusText] = useState("No internet connection");
   const [backgroundColor, setBackgroundColor] = useState("#1F2937");
   const [isVisible, setIsVisible] = useState(false);
@@ -15,12 +15,12 @@ export function OfflineBanner() {
   const translateY = useRef(new Animated.Value(-100)).current;
   const pulseAnim = useRef(new Animated.Value(0.4)).current;
   const hideTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const prevConnected = useRef<boolean | null>(null);
+  const prevInternetReachable = useRef<boolean | null>(null);
 
   // Pulsing animation for the status dot
   useEffect(() => {
     let animation: Animated.CompositeAnimation | null = null;
-    if (isConnected === false) {
+    if (isInternetReachable === false) {
       animation = Animated.loop(
         Animated.sequence([
           Animated.timing(pulseAnim, {
@@ -42,15 +42,14 @@ export function OfflineBanner() {
     return () => {
       if (animation) animation.stop();
     };
-  }, [isConnected]);
+  }, [isInternetReachable]);
 
   useEffect(() => {
-    if (isConnected === null) {
-      prevConnected.current = isConnected;
+    if (isInternetReachable === null) {
       return;
     }
 
-    if (isConnected === false) {
+    if (isInternetReachable === false) {
       if (hideTimeoutRef.current) {
         clearTimeout(hideTimeoutRef.current);
         hideTimeoutRef.current = null;
@@ -65,7 +64,7 @@ export function OfflineBanner() {
         useNativeDriver: true,
         bounciness: 4,
       }).start();
-    } else if (isConnected === true && prevConnected.current === false) {
+    } else if (isInternetReachable === true && prevInternetReachable.current === false) {
       setStatusText("Back online");
       setBackgroundColor("#10B981");
 
@@ -81,10 +80,19 @@ export function OfflineBanner() {
       }, 2000);
     }
 
-    prevConnected.current = isConnected;
-  }, [isConnected, insets.top]);
+    prevInternetReachable.current = isInternetReachable;
+  }, [isInternetReachable, insets.top]);
 
-  if (!isVisible) return null;
+  useEffect(() => {
+    return () => {
+      if (hideTimeoutRef.current) {
+        clearTimeout(hideTimeoutRef.current);
+        hideTimeoutRef.current = null;
+      }
+    };
+  }, []);
+
+  if (!isVisible || isInternetReachable === null) return null;
 
   // Position it below status bar on iOS/Android, at top on Web
   const topOffset = Platform.OS === "web" ? 0 : insets.top;
@@ -102,13 +110,13 @@ export function OfflineBanner() {
     >
       <View style={styles.content}>
         <Ionicons
-          name={isConnected ? "wifi" : "wifi-outline"}
+          name={isInternetReachable ? "wifi" : "wifi-outline"}
           size={16}
           color="#FFF"
           style={{ marginRight: 8 }}
         />
         <Text style={styles.text}>{statusText}</Text>
-        {!isConnected && (
+        {!isInternetReachable && (
           <Animated.View style={[styles.dot, { opacity: pulseAnim }]} />
         )}
       </View>

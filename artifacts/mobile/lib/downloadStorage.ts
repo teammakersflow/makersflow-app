@@ -11,7 +11,7 @@ export async function getDownloadedPath(lessonId: string): Promise<string | null
       if (info.exists && !info.isDirectory && (info.size ?? 0) > 0) {
         return path;
       } else {
-        // File no longer exists or is 0 bytes — clean up stale reference
+        // File no longer exists or is empty; clean up stale reference
         await AsyncStorage.removeItem(key(lessonId));
         return null;
       }
@@ -68,7 +68,16 @@ export async function downloadLessonVideo(
     await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
   }
 
-  const ext = videoUrl.split('?')[0].split('.').pop()?.toLowerCase() || 'mp4';
+  // Extract the extension from the S3 object pathname, not the hostname.
+  let ext = 'mp4';
+  try {
+    const pathname = new URL(videoUrl).pathname;
+    const filename = decodeURIComponent(pathname.split('/').pop() || '');
+    const match = filename.match(/\.([a-zA-Z0-9]{2,5})$/);
+    if (match) ext = match[1].toLowerCase();
+  } catch {
+    console.warn('[DownloadStorage] Could not determine video extension; using mp4');
+  }
   const targetPath = `${dir}lesson_${lessonId}.${ext}`;
   const tempPath = `${dir}lesson_${lessonId}_tmp.${ext}`;
 
@@ -88,8 +97,38 @@ export async function downloadLessonVideo(
 
   try {
     const result = await downloadResumable.downloadAsync();
+
     if (!result || !result.uri) {
       throw new Error('Download completed without valid URI');
+    }
+
+    console.log('[DownloadStorage] Server response:', {
+      status: result.status,
+      mimeType: result.mimeType,
+      contentType:
+        result.headers['content-type'] ??
+        result.headers['Content-Type'] ??
+        null,
+    });
+
+    if (result.status < 200 || result.status >= 300) {
+      throw new Error(`Video download failed with HTTP status ${result.status}`);
+    }
+
+    const contentType = (
+      result.mimeType ||
+      result.headers['content-type'] ||
+      result.headers['Content-Type'] ||
+      ''
+    ).toLowerCase();
+
+    if (
+      contentType &&
+      !contentType.startsWith('video/') &&
+      !contentType.includes('octet-stream') &&
+      !contentType.includes('application/mp4')
+    ) {
+      throw new Error(`Server returned an unexpected video content type: ${contentType}`);
     }
 
     // Replace existing target if present
@@ -99,6 +138,17 @@ export async function downloadLessonVideo(
     }
 
     await FileSystem.moveAsync({ from: tempPath, to: targetPath });
+    // Verify the final file before marking the lesson as downloaded.
+    const finalInfo = await FileSystem.getInfoAsync(targetPath);
+    if (!finalInfo.exists || finalInfo.isDirectory || (finalInfo.size ?? 0) <= 0) {
+      throw new Error('Downloaded video file is missing or empty.');
+    }
+
+    console.log('[DownloadStorage] Verified offline video:', {
+      extension: ext,
+      sizeBytes: finalInfo.size,
+    });
+
     await setDownloadedPath(lessonId, targetPath);
     return targetPath;
   } catch (err) {

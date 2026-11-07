@@ -2,16 +2,25 @@ import React, { createContext, useContext, useEffect, useState, useRef } from "r
 import NetInfo from "@react-native-community/netinfo";
 
 interface NetworkContextType {
-  isConnected: boolean;
+  isConnected: boolean | null;
+  isInternetReachable: boolean | null;
+  refreshNetwork: () => Promise<void>;
   addReconnectListener: (callback: () => void) => () => void;
 }
 
 const NetworkContext = createContext<NetworkContextType | null>(null);
 
 export function NetworkProvider({ children }: { children: React.ReactNode }) {
-  const [isConnected, setIsConnected] = useState<boolean>(true);
-  const prevConnected = useRef<boolean>(true);
+  const [isConnected, setIsConnected] = useState<boolean | null>(null);
+  const [isInternetReachable, setIsInternetReachable] = useState<boolean | null>(null);
+  const prevInternetReachable = useRef<boolean | null>(null);
+  const hasReceivedNetworkEvent = useRef(false);
   const listeners = useRef<(() => void)[]>([]);
+  const refreshNetwork = async (): Promise<void> => {
+    const state = await NetInfo.refresh();
+    setIsConnected(state.isConnected);
+    setIsInternetReachable(state.isInternetReachable);
+  };
 
   const addReconnectListener = (callback: () => void) => {
     listeners.current.push(callback);
@@ -22,18 +31,34 @@ export function NetworkProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     // Get initial network state
-    NetInfo.fetch().then((state) => {
-      const connected = state.isConnected !== false;
-      setIsConnected(connected);
-      prevConnected.current = connected;
-    });
+    NetInfo.fetch()
+      .then((state) => {
+        const connected = state.isConnected;
+
+        // Do not overwrite a newer event from the network listener.
+        if (!hasReceivedNetworkEvent.current) {
+          setIsConnected(connected);
+          setIsInternetReachable(state.isInternetReachable);
+          prevInternetReachable.current = state.isInternetReachable;
+        }
+      })
+      .catch((error) => {
+        console.warn("[NetworkContext] Initial network check failed:", error);
+        // Use the fallback only if no network state has arrived yet.
+        if (!hasReceivedNetworkEvent.current) {
+          setIsConnected(true);
+
+        }
+      });
 
     const unsubscribe = NetInfo.addEventListener((state) => {
-      const connected = state.isConnected !== false;
+      hasReceivedNetworkEvent.current = true;
+      const connected = state.isConnected;
       setIsConnected(connected);
+      setIsInternetReachable(state.isInternetReachable);
 
-      // Transition false -> true: emit reconnected events
-      if (connected && !prevConnected.current) {
+      // Transition from no internet to confirmed internet: emit reconnect events
+      if (state.isInternetReachable === true && prevInternetReachable.current === false) {
         listeners.current.forEach((cb) => {
           try {
             cb();
@@ -42,14 +67,14 @@ export function NetworkProvider({ children }: { children: React.ReactNode }) {
           }
         });
       }
-      prevConnected.current = connected;
+      prevInternetReachable.current = state.isInternetReachable;
     });
 
     return () => unsubscribe();
   }, []);
 
   return (
-    <NetworkContext.Provider value={{ isConnected, addReconnectListener }}>
+    <NetworkContext.Provider value={{ isConnected, isInternetReachable, refreshNetwork, addReconnectListener }}>
       {children}
     </NetworkContext.Provider>
   );

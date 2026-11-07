@@ -5,7 +5,7 @@ let enrollmentCacheGeneration = 0;
 const enrollmentCache = new Map<string, { data: any[]; timestamp: number }>();
 const enrollmentRequests = new Map<string, Promise<any[]>>();
 
-function clearEnrollmentCache() {
+export function clearEnrollmentCache() {
   enrollmentCacheGeneration += 1;
   enrollmentCache.clear();
   enrollmentRequests.clear();

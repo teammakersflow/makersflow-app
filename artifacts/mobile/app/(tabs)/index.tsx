@@ -244,7 +244,7 @@ export default function HomeScreen() {
   const insets = useSafeAreaInsets();
   const { panHandlers, SwipeIndicator } = useTabSwipe("/(tabs)");
   const { user, isOffline } = useAuth();
-  const { isConnected, addReconnectListener } = useNetwork();
+  const { addReconnectListener } = useNetwork();
   const { watchlist } = useProgress();
   const sortedWatchlist = useMemo(() => {
     return [...watchlist].sort(
