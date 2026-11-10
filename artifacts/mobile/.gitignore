@@ -69,3 +69,5 @@ Desktop.ini
 
 # Documentation
 docs/
+# Local EAS signing credentials
+credentials.json
