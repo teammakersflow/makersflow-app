@@ -7,7 +7,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   decideCourseCta, hasActiveAccess, isFreeCourse, coursePriceLabel, isEnrollmentExpired,
+  expiryBlocksAccess, ENFORCE_ENROLLMENT_EXPIRY,
 } from "../lib/courseAccess.ts";
+/** The expiry rule, kept for when it is switched on again (owner decision 2026-11-12: off). */
+const ENFORCED = { enforceExpiry: true };
 import { DIGITAL_COURSE_PURCHASES_IN_APP, isPhysicalStoreProduct } from "../constants/commerce.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -28,22 +31,38 @@ describe("hasActiveAccess (allow-list, expiry, revocation)", () => {
     for (const s of [null, undefined, "", "pending", "failed", "refunded", "weird"]) assert.equal(hasActiveAccess({ payment_status: s as any }, paid, NOW), false, String(s));
   });
   // 2026-11-11 (integration): aligned with the NestJS B-2 rule. A free course
-  // also needs an allow-listed, non-expired enrollment (was: any row).
-  test("free course: same allow-list and expiry as paid (backend B-2)", () => {
+  // also needs an allow-listed enrollment (was: any row).
+  test("free course: same allow-list as paid (backend B-2)", () => {
     for (const s of ["completed", "free", "PAID"]) assert.equal(hasActiveAccess({ payment_status: s }, free, NOW), true, s);
     for (const s of [null, "", "pending", "failed", "processing", "refunded", "cancelled", "weird"]) {
       assert.equal(hasActiveAccess({ payment_status: s as any }, free, NOW), false, String(s));
     }
     assert.equal(hasActiveAccess({ payment_status: "pending", courses: { is_free: true } }, paid, NOW), false);
-    assert.equal(hasActiveAccess({ payment_status: "completed", expires_at: "2026-01-01" }, free, NOW), false);
     assert.equal(hasActiveAccess({ payment_status: "completed", expires_at: "2027-01-01" }, free, NOW), true);
   });
-  test("expired or revoked never has access", () => {
-    assert.equal(hasActiveAccess({ payment_status: "completed", expires_at: "2026-01-01" }, paid, NOW), false);
+  test("revoked status or no enrollment never has access", () => {
     assert.equal(hasActiveAccess({ payment_status: "completed", status: "cancelled" }, paid, NOW), false);
     assert.equal(hasActiveAccess({ payment_status: "free", status: "revoked" }, free, NOW), false);
     assert.equal(hasActiveAccess(null, free, NOW), false);
     assert.equal(isEnrollmentExpired({ expires_at: "2027-01-01" }, NOW), false);
+  });
+
+  // Owner decision 2026-11-12: expires_at is NOT enforced yet (same as the backend).
+  test("expiry not enforced by default: expired + allowed status keeps access; bad status still denied", () => {
+    assert.equal(ENFORCE_ENROLLMENT_EXPIRY, false);
+    assert.equal(hasActiveAccess({ payment_status: "completed", expires_at: "2026-01-01" }, paid, NOW), true);
+    assert.equal(hasActiveAccess({ payment_status: "free", expires_at: "2020-01-01" }, free, NOW), true);
+    assert.equal(expiryBlocksAccess({ expires_at: "2026-01-01" }, NOW), false);
+    assert.equal(isEnrollmentExpired({ expires_at: "2026-01-01" }, NOW), true, "the pure date check still works");
+    for (const s of ["pending", "refunded", "failed", ""]) {
+      assert.equal(hasActiveAccess({ payment_status: s, expires_at: "2099-01-01" }, paid, NOW), false, s);
+    }
+  });
+  test("[enforced] expired never has access", () => {
+    assert.equal(hasActiveAccess({ payment_status: "completed", expires_at: "2026-01-01" }, paid, NOW, ENFORCED), false);
+    assert.equal(hasActiveAccess({ payment_status: "completed", expires_at: "2026-01-01" }, free, NOW, ENFORCED), false);
+    assert.equal(hasActiveAccess({ payment_status: "completed", expires_at: "2027-01-01" }, free, NOW, ENFORCED), true);
+    assert.equal(expiryBlocksAccess({ expires_at: "2026-01-01" }, NOW, ENFORCED), true);
   });
 });
 
@@ -60,15 +79,20 @@ describe("decideCourseCta never offers a purchase", () => {
     assert.equal(decideCourseCta({ ...base, signedIn: true, enrollment: null, course: paid }).kind, "not_owned");
     assert.equal(decideCourseCta({ ...base, signedIn: true, enrollment: { payment_status: "pending" }, course: paid }).kind, "not_owned");
   });
-  test("expired paid → expired (no in-app renewal)", () => {
-    assert.equal(decideCourseCta({ ...base, signedIn: true, enrollment: { payment_status: "completed", expires_at: "2026-01-01" }, course: paid }).kind, "expired");
+  test("expiry not enforced: an expired paid or free enrollment → continue", () => {
+    const expired = { payment_status: "completed", expires_at: "2026-01-01" };
+    assert.equal(decideCourseCta({ ...base, signedIn: true, enrollment: expired, course: paid }).kind, "continue");
+    assert.equal(decideCourseCta({ ...base, signedIn: true, enrollment: expired, course: free }).kind, "continue");
+  });
+  test("[enforced] expired paid → expired (no in-app renewal)", () => {
+    assert.equal(decideCourseCta({ ...base, signedIn: true, enforceExpiry: true, enrollment: { payment_status: "completed", expires_at: "2026-01-01" }, course: paid }).kind, "expired");
   });
   test("free course without active access → enroll_free (re-enroll path)", () => {
-    const cta = (enrollment: any) => decideCourseCta({ ...base, signedIn: true, enrollment, course: free }).kind;
+    const cta = (enrollment: any, enforceExpiry?: boolean) => decideCourseCta({ ...base, signedIn: true, enforceExpiry, enrollment, course: free }).kind;
     assert.equal(cta(null), "enroll_free");
     assert.equal(cta({ payment_status: "pending" }), "enroll_free");
     assert.equal(cta({ payment_status: "failed" }), "enroll_free");
-    assert.equal(cta({ payment_status: "completed", expires_at: "2026-01-01" }), "enroll_free");
+    assert.equal(cta({ payment_status: "completed", expires_at: "2026-01-01" }, true), "enroll_free");
     assert.equal(cta({ payment_status: "completed" }), "continue");
     assert.equal(cta({ payment_status: "free", expires_at: "2027-01-01" }), "continue");
   });

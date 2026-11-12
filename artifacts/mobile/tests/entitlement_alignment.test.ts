@@ -21,7 +21,7 @@ describe("same allow-list as the backend", () => {
     assert.deepEqual([...PAID_ACCESS_STATUSES].sort(), ["completed", "free", "paid"]);
   });
 
-  test("My Courses filter: only active rows survive", () => {
+  test("My Courses filter: only active rows survive (expiry not enforced, 2026-11-12)", () => {
     const rows = [
       { course_id: 1, payment_status: "completed", courses: { is_free: false } },
       { course_id: 2, payment_status: "completed", expires_at: "2026-01-01", courses: { is_free: false } },
@@ -31,7 +31,17 @@ describe("same allow-list as the backend", () => {
       { course_id: 6, payment_status: "processing", courses: { is_free: false } },
     ];
     const active = rows.filter((r) => hasActiveAccess(r, r.courses, NOW)).map((r) => r.course_id);
-    assert.deepEqual(active, [1, 5]);
+    assert.deepEqual(active, [1, 2, 5]);
+    // With expiry enforced (future), the expired row 2 drops out.
+    const enforced = rows.filter((r) => hasActiveAccess(r, r.courses, NOW, { enforceExpiry: true })).map((r) => r.course_id);
+    assert.deepEqual(enforced, [1, 5]);
+  });
+
+  test("expiry switch matches the backend (both OFF) and the UI 'expired' helper follows it", () => {
+    const access = read("lib/courseAccess.ts");
+    assert.match(access, /export const ENFORCE_ENROLLMENT_EXPIRY = false as boolean;/);
+    const svc = read("services/enrollmentService.ts");
+    assert.match(svc, /export function isExpired\(enrollment: any\): boolean \{\s*return expiryBlocksAccess\(enrollment, Date\.now\(\)\);/);
   });
 });
 

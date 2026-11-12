@@ -1,5 +1,5 @@
 import { apiClient } from '@/lib/auth/apiClient';
-import { hasActiveAccess } from '@/lib/courseAccess';
+import { expiryBlocksAccess, hasActiveAccess } from '@/lib/courseAccess';
 
 const ENROLLMENT_CACHE_TTL_MS = 10000;
 let enrollmentCacheGeneration = 0;
@@ -130,10 +130,14 @@ export async function getEnrollment(_userId?: string, courseId?: string | number
     ) || null
   );
 }
+/**
+ * True when the enrollment's expiry should block access in the UI (learn
+ * screen banner, course page). Follows ENFORCE_ENROLLMENT_EXPIRY in
+ * lib/courseAccess.ts, which is OFF (owner decision 2026-11-12), so this is
+ * false for every enrollment for now, matching the backend.
+ */
 export function isExpired(enrollment: any): boolean {
-  if (!enrollment || !enrollment.expires_at) return false;
-  const expiryDate = new Date(enrollment.expires_at);
-  return expiryDate.getTime() < Date.now();
+  return expiryBlocksAccess(enrollment, Date.now());
 }
 
 /**
