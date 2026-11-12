@@ -1,56 +1,51 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as SecureStore from 'expo-secure-store';
+import { Platform } from 'react-native';
 import { Profile } from '@/types/auth';
 import { STORAGE_KEYS } from '@/constants/storageKeys';
+import { createProfileCache, type KV } from '@/lib/profileCacheCore';
 
-const CACHE_VERSION = 1;
+/**
+ * Cached user profile for offline session continuity.
+ * L-26 (revised 2026-11-11): encrypted keystore only. It is never written in
+ * plaintext. If the keystore is unavailable, it is kept in memory for this
+ * session and re-fetched from the backend on the next launch.
+ * See lib/profileCacheCore.ts.
+ */
+const legacyPlain = {
+  get: (k: string) => AsyncStorage.getItem(k),
+  remove: (k: string) => AsyncStorage.removeItem(k),
+};
 
-interface CachedProfilePayload {
-  version: number;
-  updatedAt: string;
-  profile: Profile;
-}
+// On web there is no keystore. The profile is then session-only (memory), so
+// nothing is persisted in plaintext there either.
+const unavailable: KV = {
+  get: async () => null,
+  set: async () => { throw new Error('No encrypted storage on this platform'); },
+  remove: async () => {},
+};
+const secure: KV = Platform.OS === 'web'
+  ? unavailable
+  : {
+      get: (k) => SecureStore.getItemAsync(k),
+      set: (k, v) => SecureStore.setItemAsync(k, v),
+      remove: (k) => SecureStore.deleteItemAsync(k),
+    };
+
+const core = createProfileCache<Profile & Record<string, any>>({
+  secure,
+  legacyPlain,
+  legacyKey: STORAGE_KEYS.CACHED_USER_PROFILE,
+});
 
 export const profileCache = {
   loadProfile: async (): Promise<Profile | null> => {
     try {
-      const data = await AsyncStorage.getItem(STORAGE_KEYS.CACHED_USER_PROFILE);
-      if (!data) return null;
-      
-      const payload: CachedProfilePayload = JSON.parse(data);
-      if (payload.version !== CACHE_VERSION) {
-        console.warn('[ProfileCache] Cache version mismatch, invalidating cache.');
-        await AsyncStorage.removeItem(STORAGE_KEYS.CACHED_USER_PROFILE);
-        return null;
-      }
-      return payload.profile;
-    } catch (e) {
-      console.warn('[ProfileCache] Load failed:', e);
+      return await core.load();
+    } catch {
       return null;
     }
   },
-
-  saveProfile: async (profile: Profile): Promise<boolean> => {
-    try {
-      const payload: CachedProfilePayload = {
-        version: CACHE_VERSION,
-        updatedAt: new Date().toISOString(),
-        profile,
-      };
-      await AsyncStorage.setItem(STORAGE_KEYS.CACHED_USER_PROFILE, JSON.stringify(payload));
-      return true;
-    } catch (e) {
-      console.warn('[ProfileCache] Save failed:', e);
-      return false;
-    }
-  },
-
-  clearProfile: async (): Promise<boolean> => {
-    try {
-      await AsyncStorage.removeItem(STORAGE_KEYS.CACHED_USER_PROFILE);
-      return true;
-    } catch (e) {
-      console.warn('[ProfileCache] Clear failed:', e);
-      return false;
-    }
-  }
+  saveProfile: async (profile: Profile): Promise<boolean> => core.save(profile as Profile & Record<string, any>),
+  clearProfile: async (): Promise<boolean> => core.clear(),
 };

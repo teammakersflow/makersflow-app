@@ -1,7 +1,11 @@
 import { Tabs } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import React from "react";
-import { Platform, StyleSheet, View } from "react-native";
+import { AppState, Platform, StyleSheet, View } from "react-native";
+import { useNetwork } from "@/context/NetworkContext";
+
+/** M-30: fallback refresh for the unread badge, only while the app is in the foreground. */
+const UNREAD_FALLBACK_POLL_MS = 5 * 60 * 1000;
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { useColors } from "@/hooks/useColors";
@@ -18,6 +22,7 @@ function TabLayout() {
   const insets = useSafeAreaInsets();
   const isWeb = Platform.OS === "web";
   const { user } = useAuth();
+  const { addReconnectListener } = useNetwork();
   const [hasUnread, setHasUnread] = React.useState(false);
 
   React.useEffect(() => {
@@ -43,10 +48,35 @@ function TabLayout() {
       }
     }
 
+    // M-30 (2026-11-10): event-driven refresh instead of a 15 s poll that ran
+    // in the background and offline. Refresh on mount, when the app returns to
+    // the foreground, after reconnecting, and when a notification arrives, with
+    // a slow fallback only while the app is in the foreground.
     checkNotifications();
-    const interval = setInterval(checkNotifications, 15000);
-    return () => clearInterval(interval);
-  }, [user?.id]);
+    let appActive = AppState.currentState === "active";
+    const appSub = AppState.addEventListener("change", (s) => {
+      const nowActive = s === "active";
+      if (nowActive && !appActive) checkNotifications();
+      appActive = nowActive;
+    });
+    const offReconnect = addReconnectListener(checkNotifications);
+    let pushSub: { remove: () => void } | null = null;
+    try {
+      const Notifications = require("expo-notifications");
+      pushSub = Notifications.addNotificationReceivedListener(() => checkNotifications());
+    } catch {
+      // expo-notifications not available (e.g. Expo Go / web)
+    }
+    const interval = setInterval(() => {
+      if (appActive) checkNotifications();
+    }, UNREAD_FALLBACK_POLL_MS);
+    return () => {
+      clearInterval(interval);
+      appSub.remove();
+      offReconnect();
+      pushSub?.remove();
+    };
+  }, [user?.id, addReconnectListener]);
 
   // FIX: ensure a safe minimum floor on Android devices that report
   // insets.bottom = 0 (gesture-nav phones still have a system bar).

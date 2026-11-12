@@ -33,7 +33,8 @@ export class GoogleAuthProvider implements IAuthProvider {
       );
     }
 
-    console.log('[GoogleAuth] Configuring native Google Sign-In');
+    // L-26: no production logging in the auth path.
+    if (__DEV__) console.log('[GoogleAuth] Configuring native Google Sign-In');
 
     GoogleSignin.configure({
       webClientId,
@@ -57,7 +58,7 @@ export class GoogleAuthProvider implements IAuthProvider {
         throw new Error('Google Sign-In succeeded, but no ID token was returned.');
       }
 
-      console.log('[GoogleAuth] Native Google Sign-In successful');
+      if (__DEV__) console.log('[GoogleAuth] Native Google Sign-In successful');
 
       return {
         provider: 'google',
@@ -77,8 +78,21 @@ export class GoogleAuthProvider implements IAuthProvider {
         throw new Error('Google Play Services are not available or need to be updated.');
       }
 
-      console.error('[GoogleAuth] Native Google Sign-In error:', error);
+      if (__DEV__) console.error('[GoogleAuth] Native Google Sign-In error:', error?.code ?? error?.message);
       throw new Error(error?.message || 'Google sign-in could not be completed.');
     }
+  }
+}
+
+/**
+ * M-11 (2026-11-10): sign out of the native Google session on app logout, so the
+ * next sign-in shows the account chooser instead of silently reusing the
+ * previous Google account. Best effort; never blocks logout.
+ */
+export async function signOutOfGoogle(): Promise<void> {
+  try {
+    await GoogleSignin.signOut();
+  } catch {
+    // not signed in with Google / module unavailable
   }
 }

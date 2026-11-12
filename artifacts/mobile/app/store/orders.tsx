@@ -20,7 +20,8 @@ import { orderService } from "@/services/orderService";
 
 // ── Order Tracking Timeline ───────────────────────────────────────────────────
 const TRACKING_STEPS = [
-  { key: "pending",   label: "Order Placed",      icon: "receipt-outline" },
+  // M-13: an unpaid order is not "placed"; it is waiting for payment confirmation.
+  { key: "pending",   label: "Payment pending",   icon: "time-outline" },
   { key: "paid",      label: "Payment Confirmed", icon: "card-outline" },
   { key: "packed",    label: "Packed",            icon: "cube-outline" },
   { key: "shipped",         label: "Shipped",            icon: "airplane-outline" },

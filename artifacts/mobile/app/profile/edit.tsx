@@ -28,7 +28,7 @@ export default function EditProfileScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
   const { user, updateUser } = useAuth();
-  const { isConnected } = useNetwork();
+  const { isInternetReachable } = useNetwork();
 
   const [name, setName] = useState(user?.name ?? "");
   const [phone, setPhone] = useState(user?.phone ?? "");
@@ -43,7 +43,7 @@ export default function EditProfileScreen() {
   async function handleSave() {
     if (!user?.id) return;
 
-    if (isConnected === false) {
+    if (isInternetReachable !== true) {
       Alert.alert(
         "You're Offline",
         "You're offline — profile changes cannot be saved right now. Please reconnect to the internet and try again.",

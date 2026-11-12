@@ -1,3 +1,4 @@
+import { hasActiveAccess, isFreeCourse } from "@/lib/courseAccess";
 import { Feather, MaterialIcons, Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import { router, useLocalSearchParams, Stack } from "expo-router";
@@ -32,7 +33,6 @@ import { getCourseById, getCourseModules } from "@/services/courseDataProvider";
 import { markLessonComplete, upsertLessonProgress, fetchCourseLessonsProgress } from "@/lib/progressStorage";
 import { apiRequest } from "@/lib/auth/apiClient";
 import { getEnrollment, isExpired, completeCourse } from "@/services/enrollmentService";
-import { onSessionExpired } from "@/lib/sessionEvents";
 import { ActivityIndicator } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { fetchMyReview, upsertReview } from "@/services/reviewService";
@@ -70,9 +70,13 @@ export default function LearnScreen() {
   const [isLoading, setIsLoading] = useState(true);
   const [enrollment, setEnrollment] = useState<any>(null);
   const [isEnrollmentExpired, setIsEnrollmentExpired] = useState(false);
+  // C-5: client-side gate for deep links into courses this account cannot access.
+  // The backend remains authoritative (it must refuse signed video URLs).
+  const [accessDenied, setAccessDenied] = useState(false);
   const [activeTab, setActiveTab] = useState<"overview" | "content">("overview");
   const [activeModuleId, setActiveModuleId] = useState<string | undefined>(lessonId ? String(lessonId) : undefined);
   const [showResumeModal, setShowResumeModal] = useState(false);
+  const [startOverLessonId, setStartOverLessonId] = useState<string | undefined>(undefined);
   const [showCompleteModal, setShowCompleteModal] = useState(false);
   const [resumeFromTime, setResumeFromTime] = useState(0);
   const [downloadedPath, setDownloadedPathState] = useState<string | null>(null);
@@ -86,6 +90,9 @@ export default function LearnScreen() {
   // Kept in runtime state only — never persisted; expires after 300 s.
   const [signedVideoUrl, setSignedVideoUrl] = useState<string | null>(null);
   const [isSignedUrlLoading, setIsSignedUrlLoading] = useState(false);
+  // M-22: why the signed URL is missing (drives the error/retry UI) + retry trigger.
+  const [signedUrlError, setSignedUrlError] = useState<null | "network" | "forbidden" | "unavailable">(null);
+  const [signedUrlAttempt, setSignedUrlAttempt] = useState(0);
 
   const [myReview, setMyReview] = useState<any>(null);
   const [reviewRating, setReviewRating] = useState(0);
@@ -107,7 +114,7 @@ export default function LearnScreen() {
     { id: string; title: string; url: string; type: string | null; size_bytes?: number | null }[]
   >([]);
   const [lessonNotes, setLessonNotes] = useState<string[]>([]);
-  
+
   useEffect(() => {
     if (!activeModuleId || isNaN(Number(activeModuleId))) {
       setLessonResources([]);
@@ -149,19 +156,6 @@ export default function LearnScreen() {
     })();
   }, [activeModuleId]);
 
-  useEffect(() => {
-    const unsubscribe = onSessionExpired(() => {
-      Alert.alert(
-        "Session expired",
-        "Your session has expired, so your progress can't be saved. Please log in again to continue.",
-        [
-          { text: "Keep Watching", style: "cancel" },
-          { text: "Log In", onPress: () => router.replace("/(auth)/login") },
-        ],
-      );
-    });
-    return unsubscribe;
-  }, []);
 
   useEffect(() => {
     async function loadData() {
@@ -248,7 +242,11 @@ export default function LearnScreen() {
             setEnrollment(enrollData);
             if (enrollData && isExpired(enrollData)) {
               setIsEnrollmentExpired(true);
+            } else if (!hasActiveAccess(enrollData, mappedCourse)) {
+              setAccessDenied(true);
             }
+          } else if (!isFreeCourse(mappedCourse)) {
+            setAccessDenied(true);
           }
         }
       } catch (error) {
@@ -335,6 +333,7 @@ export default function LearnScreen() {
 
     let cancelled = false;
     setSignedVideoUrl(null);
+    setSignedUrlError(null);
     setIsSignedUrlLoading(true);
 
     fetchSignedVideoUrl(activeModuleId)
@@ -342,6 +341,7 @@ export default function LearnScreen() {
         if (!cancelled) {
           if (!url) {
             console.warn('[LearnScreen] No signed URL for lesson', activeModuleId);
+            setSignedUrlError("unavailable");
           }
           setSignedVideoUrl(url);
         }
@@ -349,6 +349,8 @@ export default function LearnScreen() {
       .catch((err: any) => {
         if (!cancelled) {
           console.warn('[LearnScreen] Signed video URL fetch failed:', err?.message ?? err);
+          const status = err?.status ?? err?.statusCode ?? err?.response?.status;
+          setSignedUrlError(status === 401 || status === 403 ? "forbidden" : "network");
           setSignedVideoUrl(null);
         }
       })
@@ -359,7 +361,18 @@ export default function LearnScreen() {
     return () => {
       cancelled = true;
     };
-  }, [activeModuleId, isLoading, downloadedMap, fetchSignedVideoUrl, lessons]);
+  }, [activeModuleId, isLoading, downloadedMap, fetchSignedVideoUrl, lessons, signedUrlAttempt]);
+
+  // H-8: give the player a way to obtain a fresh signed URL when the current one
+  // expires (≈300 s) or playback fails, instead of retrying the expired URL.
+  const refreshActiveSignedUrl = useCallback(async (): Promise<string | null> => {
+    const id = activeLessonIdRef.current;
+    if (!id) return null;
+    // The player swaps in the returned URL itself and keeps its position. Do NOT
+    // also put it in state: a prop change would reload the source and seek to
+    // the initial time again.
+    return refreshSignedVideoUrl(id);
+  }, [refreshSignedVideoUrl]);
 
   const isCourseCompleted = !!enrollment?.completed_at;
   const completedModules = lessonsProgress.filter((p) => p.is_completed).length;
@@ -371,7 +384,8 @@ export default function LearnScreen() {
 
   const activeModule = lessons.find((m) => m.id === activeModuleId) ?? lessons[0];
   const activeLessonProgress = lessonsProgress.find((p) => String(p.lesson_id) === activeModule?.id);
-  const initialTime = showResumeModal ? 0 : (activeLessonProgress?.current_time_secs ?? 0);
+  // M-18: explicit choice. "Start over" must not briefly resume the old position.
+  const initialTime = showResumeModal || startOverLessonId === activeModuleId ? 0 : (activeLessonProgress?.current_time_secs ?? 0);
   const isSaved = activeModule ? isInWatchLater(activeModule.id) : false;
 
   // Stable callbacks — prevent VideoPlayerEnhanced from recreating its
@@ -397,37 +411,43 @@ export default function LearnScreen() {
 
     const completedCount = updatedProgress.filter((p) => p.is_completed).length;
     if (totalLessons > 0 && completedCount >= totalLessons) {
-      if (!enrollment?.completed_at) {
+      let completedEnrollment = enrollment;
+      if (!completedEnrollment?.completed_at) {
         try {
           await completeCourse(user.id, Number(courseId));
-          const enrollData = await getEnrollment(user.id, Number(courseId));
-          setEnrollment(enrollData);
+          completedEnrollment = await getEnrollment(user.id, Number(courseId));
+          setEnrollment(completedEnrollment);
         } catch (e) {
           console.error('[CompleteCourse] error:', e);
         }
       }
-      // Self-issue certificate on NestJS backend
-      issueCertificate(Number(courseId)).catch(() => {});
+      try {
+        const issuedCertificate = await issueCertificate(Number(courseId));
+        if (!issuedCertificate) { throw new Error('Certificate issuance returned no certificate.'); }
 
-      const certKey = `@cert_shown:${user.id}:${courseId}`;
-      const alreadyShown = await AsyncStorage.getItem(certKey);
-      if (!alreadyShown) {
-        await AsyncStorage.setItem(certKey, 'true');
-        router.push({
-          pathname: '/certificate',
-          params: {
-            courseName: course?.title ?? '',
-            studentName: user.name ?? '',
-            completionDate: new Date().toISOString(),
-            courseId: String(courseId ?? ''),
-            level: (course as any)?.level,
-            instructor: (course as any)?.instructor,
-          },
-        });
-        return;
+        const certKey = `@cert_shown:${user.id}:${courseId}`;
+        const alreadyShown = await AsyncStorage.getItem(certKey);
+        if (!alreadyShown) {
+          await AsyncStorage.setItem(certKey, 'true');
+          router.push({
+            pathname: '/certificate',
+            params: {
+              courseName: course?.title ?? '',
+              studentName: user.name ?? '',
+              completionDate: completedEnrollment?.completed_at ?? enrollment?.completed_at ?? issuedCertificate?.issued_at ?? '',
+              courseId: String(courseId ?? ''),
+                certNumber: issuedCertificate?.certificate_number ?? '',
+              level: (course as any)?.level,
+              instructor: (course as any)?.instructor,
+            },
+          });
+          return;
+        }
+
+      } catch (certificateError) {
+        console.error('[Certificate] issuance/display failed:', certificateError);
       }
     }
-
     setShowCompleteModal(true);
   }, [user?.id, courseId, activeModule?.id, totalLessons, enrollment?.completed_at, course?.title, lessons]);
 
@@ -524,7 +544,13 @@ export default function LearnScreen() {
     setDownloadProgress(0);
 
     try {
-      const savedPath = await downloadLessonVideo(target.id, target.videoUrl, (pct) => {
+      const signedUrl = await fetchSignedVideoUrl(String(target.id));
+
+      if (!signedUrl) {
+        throw new Error('Could not obtain a secure video download URL. Please try again.');
+      }
+
+      const savedPath = await downloadLessonVideo(target.id, signedUrl, (pct) => {
         setDownloadProgress(pct);
       });
 
@@ -571,11 +597,13 @@ export default function LearnScreen() {
 
 
   const handleResumeVideo = () => {
-    setShowResumeModal(false);
+    setStartOverLessonId(undefined);
+    setShowResumeModal(false); // initialTime becomes the saved position; the player seeks (M-18)
   };
 
   const handleStartOver = async () => {
     if (!user?.id || !courseId || !activeModule?.id) return;
+    setStartOverLessonId(activeModuleId);
     setShowResumeModal(false);
     await upsertLessonProgress(user.id, Number(courseId), Number(activeModule.id), 0, 0);
     const progressData = await fetchCourseLessonsProgress(user.id, Number(courseId));
@@ -630,34 +658,42 @@ export default function LearnScreen() {
 
       const completedCount = updatedProgress.filter((p) => p.is_completed).length;
       if (totalLessons > 0 && completedCount >= totalLessons) {
-        if (!enrollment?.completed_at) {
+        let completedEnrollment = enrollment;
+        if (!completedEnrollment?.completed_at) {
           try {
             await completeCourse(user.id, courseId);
-            const enrollData = await getEnrollment(user.id, courseId);
-            setEnrollment(enrollData);
+            completedEnrollment = await getEnrollment(user.id, courseId);
+            setEnrollment(completedEnrollment);
           } catch (e) {
             console.error('[CompleteCourse] error:', e);
           }
         }
-        const certKey = `@cert_shown:${user.id}:${courseId}`;
-        const alreadyShown = await AsyncStorage.getItem(certKey);
-        if (!alreadyShown) {
-          await AsyncStorage.setItem(certKey, 'true');
-          router.push({
-            pathname: '/certificate',
-            params: {
-              courseName: course?.title ?? '',
-              studentName: user.name ?? '',
-              completionDate: new Date().toISOString(),
-              courseId: String(courseId ?? ''),
-              level: (course as any)?.level,
-              instructor: (course as any)?.instructor,
-            },
-          });
-          return;
+        try {
+          const issuedCertificate = await issueCertificate(Number(courseId));
+          if (!issuedCertificate) { throw new Error('Certificate issuance returned no certificate.'); }
+          const certKey = `@cert_shown:${user.id}:${courseId}`;
+          const alreadyShown = await AsyncStorage.getItem(certKey);
+          if (!alreadyShown) {
+            await AsyncStorage.setItem(certKey, 'true');
+            router.push({
+              pathname: '/certificate',
+              params: {
+                courseName: course?.title ?? '',
+                studentName: user.name ?? '',
+                completionDate: completedEnrollment?.completed_at ?? enrollment?.completed_at ?? issuedCertificate?.issued_at ?? '',
+                courseId: String(courseId ?? ''),
+                certNumber: issuedCertificate?.certificate_number ?? '',
+                level: (course as any)?.level,
+                instructor: (course as any)?.instructor,
+              },
+            });
+            return;
+          }
+
+        } catch (certificateError) {
+          console.error('[Certificate] issuance/display failed:', certificateError);
         }
       }
-
       setShowCompleteModal(true);
     } catch (e) {
       console.error('[markComplete] error:', e);
@@ -697,12 +733,12 @@ export default function LearnScreen() {
     const modProgress = lessonsProgress.find((p) => String(p.lesson_id) === module.id);
     const isCompleted = modProgress?.is_completed || false;
     const isCurrent = activeModuleId === module.id;
-    
+
     const previousModule = lessons[index - 1];
     const prevProgress = previousModule ? lessonsProgress.find((p) => String(p.lesson_id) === previousModule.id) : null;
     const canAccess = index === 0 || !previousModule || prevProgress?.is_completed;
     const isLocked = !canAccess;
-    
+
     return { isCompleted, isCurrent, isLocked };
   };
 
@@ -792,20 +828,47 @@ export default function LearnScreen() {
 
       {/* Video Player */}
       <View style={styles.videoWrapper}>
-        {isEnrollmentExpired ? (
+        {accessDenied && !isEnrollmentExpired ? (
+          <View style={[styles.expiryBanner, { backgroundColor: colors.card, borderColor: colors.border }]}>
+            <Feather name="lock" size={32} color="#0B6FAD" />
+            <Text style={[styles.expiryText, { color: colors.foreground }]}>
+              {user?.id && isFreeCourse(course)
+                ? "Enroll in this free course to start learning."
+                : "This course is not available on this account."}
+            </Text>
+            {user?.id && isFreeCourse(course) ? (
+              <Pressable
+                style={[styles.supportBtn, { backgroundColor: "#0B6FAD" }]}
+                onPress={() => router.replace(`/course/${courseId}`)}
+              >
+                <Text style={styles.supportBtnText}>Enroll for Free</Text>
+              </Pressable>
+            ) : null}
+          </View>
+        ) : isEnrollmentExpired ? (
           <View style={[styles.expiryBanner, { backgroundColor: colors.card, borderColor: colors.border }]}>
             <Feather name="alert-triangle" size={32} color="#DC2626" />
             <Text style={[styles.expiryText, { color: colors.foreground }]}>
               Your access expired on {enrollment?.expires_at ? new Date(enrollment.expires_at).toLocaleDateString() : ""}
             </Text>
-            <Pressable
-              style={[styles.supportBtn, { backgroundColor: "#0B6FAD" }]}
-              onPress={() => {
-                Linking.openURL('mailto:support@edodwaja.com?subject=Course Access Renewal');
-              }}
-            >
-              <Text style={styles.supportBtnText}>Contact Support</Text>
-            </Pressable>
+            {isFreeCourse(course) ? (
+              // Free course: the backend renews an expired free enrollment.
+              <Pressable
+                style={[styles.supportBtn, { backgroundColor: "#0B6FAD" }]}
+                onPress={() => router.replace(`/course/${courseId}`)}
+              >
+                <Text style={styles.supportBtnText}>Re-enroll for Free</Text>
+              </Pressable>
+            ) : (
+              <Pressable
+                style={[styles.supportBtn, { backgroundColor: "#0B6FAD" }]}
+                onPress={() => {
+                  Linking.openURL('mailto:support@edodwaja.com?subject=Course%20access%20help');
+                }}
+              >
+                <Text style={styles.supportBtnText}>Contact Support</Text>
+              </Pressable>
+            )}
           </View>
         ) : (
           (() => {
@@ -815,6 +878,7 @@ export default function LearnScreen() {
             if (localPath) {
               return (
                 <VideoPlayerEnhanced
+                  key={`local-${activeModule?.id}`}
                   videoUrl={localPath}
                   initialTime={initialTime}
                   onProgressUpdate={handleProgressUpdate}
@@ -839,11 +903,38 @@ export default function LearnScreen() {
             if (signedVideoUrl) {
               return (
                 <VideoPlayerEnhanced
+                  key={`remote-${activeModule?.id}`}
                   videoUrl={signedVideoUrl}
                   initialTime={initialTime}
                   onProgressUpdate={handleProgressUpdate}
                   onComplete={handleVideoComplete}
+                  onRefreshVideoUrl={refreshActiveSignedUrl}
                 />
+              );
+            }
+
+            // M-22: explain why there is no video and offer a retry, instead of a blank area.
+            if (activeModule?.videoUrl && signedUrlError) {
+              return (
+                <View style={[styles.expiryBanner, { backgroundColor: colors.card, borderColor: colors.border }]}>
+                  <Feather name={signedUrlError === "network" ? "wifi-off" : "alert-circle"} size={28} color="#0B6FAD" />
+                  <Text style={[styles.expiryText, { color: colors.foreground }]}>
+                    {signedUrlError === "network"
+                      ? "Couldn't load this video. Check your connection and try again."
+                      : signedUrlError === "forbidden"
+                        ? "This video is not available on this account."
+                        : "This video is temporarily unavailable."}
+                  </Text>
+                  {signedUrlError !== "forbidden" && (
+                    <Pressable
+                      style={[styles.supportBtn, { backgroundColor: "#0B6FAD" }]}
+                      onPress={() => setSignedUrlAttempt((n) => n + 1)}
+                      accessibilityRole="button"
+                    >
+                      <Text style={styles.supportBtnText}>Try again</Text>
+                    </Pressable>
+                  )}
+                </View>
               );
             }
 
@@ -852,7 +943,7 @@ export default function LearnScreen() {
         )}
       </View>
 
-      {!isEnrollmentExpired && activeModule && (activeModule.description?.trim() || !activeModule.videoUrl) && (
+      {!isEnrollmentExpired && !accessDenied && activeModule && (activeModule.description?.trim() || !activeModule.videoUrl) && (
         <View style={{ backgroundColor: colors.card, marginHorizontal: 16, marginTop: 12, marginBottom: 12, padding: 16, borderRadius: 12, gap: 10 }}>
           {activeModule?.description?.trim() ? (
             <>
@@ -1178,7 +1269,7 @@ const styles = StyleSheet.create({
   downloadBtn: { width: 44, height: 44, borderRadius: 22, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(11, 111, 173, 0.08)" },
   shareBtn: { width: 44, height: 44, borderRadius: 22, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(11, 111, 173, 0.08)" },
   headerTitle: { flex: 1, fontSize: 17, fontFamily: "Fredoka_700Bold", textAlign: "center" },
-  
+
   courseHeader: {
     paddingHorizontal: 16,
     paddingVertical: 10,
@@ -1275,7 +1366,7 @@ const styles = StyleSheet.create({
   tabs: { flexDirection: "row", borderBottomWidth: 1 },
   tab: { flex: 1, paddingVertical: 14, alignItems: "center", borderBottomWidth: 2, borderBottomColor: "transparent" },
   tabText: { fontSize: 14 },
-  
+
   moduleList: { padding: 16, gap: 10 },
   modItem: {
     flexDirection: "row",

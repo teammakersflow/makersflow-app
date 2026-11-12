@@ -12,6 +12,7 @@ def projectRoot = rootDir.getAbsoluteFile().getParentFile().getAbsolutePath()
  */
 react {
     entryFile = file(["node", "-e", "require('expo/scripts/resolveAppEntry')", projectRoot, "android", "absolute"].execute(null, rootDir).text.trim())
+    root = file(projectRoot)
     reactNativeDir = new File(["node", "--print", "require.resolve('react-native/package.json')"].execute(null, rootDir).text.trim()).getParentFile().getAbsoluteFile()
     hermesCommand = new File(["node", "--print", "require.resolve('react-native/package.json')"].execute(null, rootDir).text.trim()).getParentFile().getAbsolutePath() + "/sdks/hermesc/%OS-BIN%/hermesc"
     codegenDir = new File(["node", "--print", "require.resolve('@react-native/codegen/package.json', { paths: [require.resolve('react-native/package.json')] })"].execute(null, rootDir).text.trim()).getParentFile().getAbsoluteFile()
@@ -90,17 +91,23 @@ android {
     compileSdk rootProject.ext.compileSdkVersion
 
     namespace 'com.makersflow.app'
-    externalNativeBuild {
-        cmake {
-            buildStagingDirectory = file("C:/cxx")
+    // L-5 (2026-11-10): the short C:/cxx staging path works around the Windows
+    // path-length limit for CMake builds. It is applied on Windows only, so
+    // Linux/macOS builders (e.g. EAS) use the default location. Behaviour on the
+    // Windows machine that produced the known-good AAB is unchanged.
+    if (System.getProperty("os.name").toLowerCase().contains("windows")) {
+        externalNativeBuild {
+            cmake {
+                buildStagingDirectory = file("C:/cxx")
+            }
         }
     }
     defaultConfig {
         applicationId 'com.makersflow.app'
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 13
-        versionName "1.0.7"
+        versionCode 18
+        versionName "1.0.8"
 
         buildConfigField "String", "REACT_NATIVE_RELEASE_LEVEL", "\"${findProperty('reactNativeReleaseLevel') ?: 'stable'}\""
     }
@@ -125,7 +132,14 @@ android {
             signingConfig signingConfigs.debug
         }
         release {
-            signingConfig project.hasProperty('MYAPP_RELEASE_STORE_FILE') ? signingConfigs.release : signingConfigs.debug
+            // M-2 (2026-11-10): never fall back to the debug key for release.
+            // Without the upload-keystore properties the release build fails
+            // (see the guard at the end of this file) instead of producing a
+            // debug-signed AAB that Play would reject. The signing identity
+            // (signingConfigs.release above) is unchanged.
+            if (project.hasProperty('MYAPP_RELEASE_STORE_FILE')) {
+                signingConfig signingConfigs.release
+            }
             def enableShrinkResources = findProperty('android.enableShrinkResourcesInReleaseBuilds') ?: 'false'
             shrinkResources enableShrinkResources.toBoolean()
             minifyEnabled enableMinifyInReleaseBuilds
@@ -191,5 +205,28 @@ dependencies {
         implementation("com.facebook.react:hermes-android")
     } else {
         implementation jscFlavor
+    }
+}
+
+// ── M-2 (2026-11-10): release signing guard ─────────────────────────────────
+// Fails any task that would package or sign a RELEASE artifact (bundleRelease,
+// assembleRelease, packageRelease, signReleaseBundle, ...) unless the upload
+// keystore is configured and the keystore file exists. Tasks that do not
+// produce a release package (e.g. processReleaseManifest, lint) are unaffected.
+gradle.taskGraph.whenReady { graph ->
+    def releasePackaging = graph.allTasks.any { t ->
+        t.project == project && (t.name ==~ /(bundle|assemble|package|sign)Release.*/)
+    }
+    if (!releasePackaging) return
+    def required = ['MYAPP_RELEASE_STORE_FILE', 'MYAPP_RELEASE_STORE_PASSWORD', 'MYAPP_RELEASE_KEY_ALIAS', 'MYAPP_RELEASE_KEY_PASSWORD']
+    def missing = required.findAll { !project.hasProperty(it) || !project.property(it)?.toString()?.trim() }
+    if (!missing.isEmpty()) {
+        throw new GradleException("Release signing is not configured (missing: ${missing.join(', ')}). " +
+            "Configure the upload keystore in ~/.gradle/gradle.properties (see MAKERSFLOW_PHASE8_BUILD_PREP.md). " +
+            "Refusing to build a release with the debug key.")
+    }
+    def storeFile = file(project.property('MYAPP_RELEASE_STORE_FILE'))
+    if (!storeFile.exists()) {
+        throw new GradleException("Release keystore not found at the configured MYAPP_RELEASE_STORE_FILE path.")
     }
 }

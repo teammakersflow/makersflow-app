@@ -10,6 +10,8 @@ import {
   SafeAreaView,
 } from "react-native";
 import { WebView, WebViewMessageEvent, WebViewProps } from "react-native-webview";
+import { Alert, Linking } from "react-native";
+import { decideNavigation, parseCheckoutMessage, toScriptJson, validateCheckoutParams } from "@/lib/razorpayCheckout";
 
 const LOCAL_BRAND_ICON =
   "https://makersflow.in/makersflow-logo-dark.png";
@@ -44,11 +46,24 @@ type Props = {
 
 // ─── Build HTML ───────────────────────────────────────────────────────────────
 
-function buildRazorpayHTML(p: RazorpayPaymentParams): string {
-  const safeName = p.name.replace(/"/g, '\\"').replace(/'/g, "\\'");
-  const safeEmail = p.email.replace(/"/g, '\\"');
-  const safePhone = p.phone.replace(/\s/g, "").replace(/^\+91/, "");
-  const safeDesc = p.description.replace(/"/g, '\\"');
+function buildRazorpayHTML(input: RazorpayPaymentParams): string {
+  // M-12: validate, then inject as script-safe JSON. Values are never
+  // concatenated into JavaScript string literals.
+  const checked = validateCheckoutParams(input);
+  if (!checked.ok) throw new Error(`Invalid checkout parameters: ${checked.error}`);
+  const p = checked.value;
+  const config = toScriptJson({
+    key: p.keyId,
+    amount: p.amount,
+    currency: p.currency,
+    order_id: p.orderId,
+    name: "MakersFlow",
+    description: p.description,
+    image: LOCAL_BRAND_ICON,
+    prefill: { name: p.name, email: p.email, contact: p.phone },
+  });
+  // L-24: show rupees with paise (two decimals), not a rounded amount.
+  const amountLabel = (p.amount / 100).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
   return `<!DOCTYPE html>
 <html>
@@ -85,25 +100,22 @@ function buildRazorpayHTML(p: RazorpayPaymentParams): string {
   <div class="loader">
     <div class="ring"></div>
     <h3>Opening Secure Payment</h3>
-    <div class="amount">₹${Math.round(p.amount / 100).toLocaleString("en-IN")}</div>
+    <div class="amount">₹${amountLabel}</div>
     <p>Powered by Razorpay</p>
     <p class="lock">🔒 Your payment information is encrypted</p>
   </div>
 
   <script>
+    var cfg = ${config};
     var rzpOptions = {
-      key:         "${p.keyId}",
-      amount:      ${p.amount},
-      currency:    "${p.currency}",
-      order_id:    "${p.orderId}",
-      name:        "MakersFlow",
-      description: "${safeDesc}",
-      image:       "${LOCAL_BRAND_ICON}",
-      prefill: {
-        name:    "${safeName}",
-        email:   "${safeEmail}",
-        contact: "${safePhone}",
-      },
+      key:         cfg.key,
+      amount:      cfg.amount,
+      currency:    cfg.currency,
+      order_id:    cfg.order_id,
+      name:        cfg.name,
+      description: cfg.description,
+      image:       cfg.image,
+      prefill:     cfg.prefill,
       theme: {
         color: "#4F46E5",
         hide_topbar: false,
@@ -145,7 +157,7 @@ function buildRazorpayHTML(p: RazorpayPaymentParams): string {
       catch(e) {
         window.ReactNativeWebView.postMessage(JSON.stringify({
           type:   "payment_failed",
-          reason: "Could not open payment window: " + e.message,
+          reason: "Could not open payment window",
         }));
       }
     }, 500);
@@ -166,18 +178,37 @@ export function RazorpayWebView({
   const webViewRef = useRef<WebView>(null);
 
   function handleMessage(event: WebViewMessageEvent) {
-    try {
-      const data = JSON.parse(event.nativeEvent.data);
-      if (data.type === "payment_success") {
-        onSuccess(data.paymentId, data.orderId, data.signature);
-      } else if (data.type === "payment_failed") {
-        onFailure(data.reason ?? "Payment was not completed");
-      } else if (data.type === "payment_dismissed") {
-        onDismiss();
-      }
-    } catch (e) {
-      console.warn("[RazorpayWebView] Could not parse message:", event.nativeEvent.data);
+    if (!params) return;
+    const msg = parseCheckoutMessage(event.nativeEvent.data, event.nativeEvent.url, params.orderId);
+    if (!msg) {
+      console.warn("[RazorpayWebView] Ignored untrusted or malformed message");
+      return;
     }
+    if (msg.type === "payment_success") onSuccess(msg.paymentId, msg.orderId, msg.signature);
+    else if (msg.type === "payment_failed") onFailure(msg.reason);
+    else onDismiss();
+  }
+
+  // M-13: closing while a payment may be in progress must be deliberate.
+  function requestClose() {
+    Alert.alert(
+      "Cancel payment?",
+      "If you have already completed the payment, it will be confirmed automatically and appear in My Orders.",
+      [
+        { text: "Continue paying", style: "cancel" },
+        { text: "Close", style: "destructive", onPress: onDismiss },
+      ],
+    );
+  }
+
+  // M-12: keep https in the WebView (3-D Secure), hand UPI/intent links to the OS, block the rest.
+  function handleShouldStart(req: { url: string }): boolean {
+    const decision = decideNavigation(req.url);
+    if (decision === "open_externally") {
+      Linking.openURL(req.url).catch(() => onFailure("Could not open the payment app"));
+      return false;
+    }
+    return decision === "allow";
   }
 
   return (
@@ -185,7 +216,7 @@ export function RazorpayWebView({
       visible={visible}
       animationType="slide"
       presentationStyle={Platform.OS === "ios" ? "pageSheet" : "fullScreen"}
-      onRequestClose={onDismiss}
+      onRequestClose={requestClose}
     >
       <SafeAreaView style={styles.container}>
         {/* Header bar */}
@@ -195,7 +226,7 @@ export function RazorpayWebView({
             <Text style={styles.headerTitle}>Secure Checkout</Text>
             <Text style={styles.headerSub}>🔒 Powered by Razorpay</Text>
           </View>
-          <Pressable onPress={onDismiss} style={styles.closeBtn} hitSlop={12}>
+          <Pressable onPress={requestClose} style={styles.closeBtn} hitSlop={12} accessibilityRole="button" accessibilityLabel="Close payment">
             <Text style={styles.closeText}>✕</Text>
           </Pressable>
         </View>
@@ -206,6 +237,8 @@ export function RazorpayWebView({
             ref={webViewRef}
             source={{ html: buildRazorpayHTML(params) }}
             onMessage={handleMessage}
+            onShouldStartLoadWithRequest={handleShouldStart}
+            setSupportMultipleWindows={false}
             javaScriptEnabled
             domStorageEnabled
             startInLoadingState
@@ -216,8 +249,8 @@ export function RazorpayWebView({
               </View>
             )}
             style={styles.webview}
-            originWhitelist={["*"]}
-            mixedContentMode="always"
+            originWhitelist={["https://*", "about:*", "data:*", "upi:*", "intent:*"]}
+            mixedContentMode="never"
             allowsInlineMediaPlayback
             userAgent={
               Platform.OS === "android"

@@ -70,7 +70,7 @@ export default function TermsOfServiceScreen() {
         
         <Text style={[styles.subheading, { color: colors.foreground }]}>Payment Processing</Text>
         <Text style={[styles.body, { color: colors.foreground }]}>
-          Payments for courses, store items, and physical kits are processed securely through Razorpay, our third-party payment provider. By making a purchase, you agree to Razorpay's terms and conditions.
+          Payments for store items and physical kits made in the app are processed securely through Razorpay, our third-party payment provider. Digital courses cannot be purchased in the app; courses already on your account are available after you sign in. By making a purchase, you agree to Razorpay's terms and conditions.
         </Text>
 
         <Text style={[styles.subheading, { color: colors.foreground }]}>Refund Policy</Text>

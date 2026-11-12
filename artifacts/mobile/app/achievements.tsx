@@ -20,16 +20,17 @@ import { apiRequest } from "@/lib/auth/apiClient";
 import { getCourseModules } from "@/services/courseDataProvider";
 import { fetchEnrolledCourses } from "@/services/enrollmentService";
 import { fetchCourseProgress } from "@/lib/progressStorage";
-import { issueCertificate } from "@/services/certificateService";
+import { fetchMyCertificatesStrict, type Certificate } from "@/services/certificateService";
 import { TEXT_STYLES, TYPOGRAPHY } from "@/constants/typography";
 import { AchievementsSkeleton } from "@/components/SkeletonLoader";
 
 interface CompletedCourse {
   courseId: string;
   courseTitle: string;
-  completedAt: string;
+  completedAt: string | null;
   level?: string;
   instructor?: string;
+  certificateNumber?: string;
 }
 
 export default function AchievementsScreen() {
@@ -39,15 +40,19 @@ export default function AchievementsScreen() {
   const topPad = Platform.OS === "web" ? 67 : insets.top;
 
   const [completedCourses, setCompletedCourses] = useState<CompletedCourse[]>([]);
-  const [leaderboard, setLeaderboard] = useState<Array<{ id: string; name: string; xp: number }>>([]);
+  const [issuedCertificates, setIssuedCertificates] = useState<Certificate[]>([]);
+  const [leaderboard, setLeaderboard] = useState<Array<{ id: string; name: string }>>([]);
+  const [leaderboardLoading, setLeaderboardLoading] = useState(true);
   const [isLoading, setIsLoading] = useState(true);
   const hasLoadedOnce = useRef(false);
 
   const [viewedCerts, setViewedCerts] = useState<string[]>([]);
+  const [longestStreak, setLongestStreak] = useState(0);
 
   useEffect(() => {
     let isMounted = true;
     const loadViewedAndLeaderboard = async () => {
+      setLeaderboardLoading(true);
       try {
         const stored = await AsyncStorage.getItem("viewed_certificates");
         if (stored && isMounted) setViewedCerts(JSON.parse(stored));
@@ -60,7 +65,7 @@ export default function AchievementsScreen() {
             const mapped = lbData.map((item: any, idx: number) => ({
               id: item.user_id || String(idx + 1),
               name: item.name || "MakersFlow Learner",
-              xp: (item.longest_streak ?? 0) * 50 + 100,
+
             }));
             setLeaderboard(mapped.slice(0, 10));
           }
@@ -72,12 +77,43 @@ export default function AchievementsScreen() {
         }
       } catch (err) {
         console.error("Error loading leaderboard:", err);
+      } finally {
+        if (isMounted) setLeaderboardLoading(false);
       }
     };
     loadViewedAndLeaderboard();
     return () => { isMounted = false; };
-  }, [user?.name]);
+  }, [user?.id]);
 
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadStreak = async () => {
+      if (!user?.id) {
+        setLongestStreak(0);
+        return;
+      }
+
+      try {
+        const streakRes = await apiRequest<any>('/streaks/me');
+        const streakData = streakRes?.data ??
+          (streakRes && typeof streakRes.longest_streak === "number" ? streakRes : null);
+        const value = Number(streakData?.longest_streak ?? 0);
+
+        if (isMounted) {
+          setLongestStreak(Number.isFinite(value) && value > 0 ? value : 0);
+        }
+      } catch (error) {
+        console.warn("[Achievements] Could not load streak data:", error);
+        if (isMounted) setLongestStreak(0);
+      }
+    };
+
+    loadStreak();
+    return () => {
+      isMounted = false;
+    };
+  }, [user?.id]);
   const handleMarkAsViewed = async (courseId: string) => {
     if (viewedCerts.includes(courseId)) return;
     const updated = [...viewedCerts, courseId];
@@ -93,11 +129,21 @@ export default function AchievementsScreen() {
     useCallback(() => {
       async function loadCompletedCourses() {
         if (!user?.id) {
+          setCompletedCourses([]);
+          setIssuedCertificates([]);
           setIsLoading(false);
+          hasLoadedOnce.current = false;
           return;
         }
         if (!hasLoadedOnce.current) setIsLoading(true);
         try {
+          try {
+            const certificates = await fetchMyCertificatesStrict();
+            setIssuedCertificates(certificates);
+          } catch (certificateError) {
+            console.error("[Achievements] certificate loading error:", certificateError);
+          }
+
           const validEnrollments = await fetchEnrolledCourses(user.id);
           const results: CompletedCourse[] = [];
 
@@ -115,7 +161,6 @@ export default function AchievementsScreen() {
                 level,
                 instructor,
               });
-              issueCertificate(Number(courseId)).catch(() => {});
               continue;
             }
 
@@ -124,11 +169,10 @@ export default function AchievementsScreen() {
               results.push({
                 courseId,
                 courseTitle,
-                completedAt: enr.enrolled_at ?? new Date().toISOString(),
+                completedAt: enr.completed_at ?? null,
                 level,
                 instructor,
               });
-              issueCertificate(Number(courseId)).catch(() => {});
             }
           }
 
@@ -137,30 +181,59 @@ export default function AchievementsScreen() {
           console.error("[Achievements] error:", err);
         } finally {
           setIsLoading(false);
+          hasLoadedOnce.current = true;
         }
       }
       loadCompletedCourses();
     }, [user?.id])
   );
 
-  const formatDate = (iso: string) =>
-    new Date(iso).toLocaleDateString("en-IN", {
+  const certificateCourses: CompletedCourse[] = [
+    ...completedCourses.map((course) => {
+      const certificate = issuedCertificates.find(
+        (item) => String(item.course_id) === course.courseId
+      );
+      return {
+        ...course,
+        certificateNumber: certificate?.certificate_number,
+      };
+    }),
+    ...issuedCertificates
+      .filter((certificate) =>
+        !completedCourses.some(
+          (course) => course.courseId === String(certificate.course_id)
+        )
+      )
+      .map((certificate) => ({
+        courseId: String(certificate.course_id),
+        courseTitle: `Course #${certificate.course_id}`,
+        completedAt: null,
+        certificateNumber: certificate.certificate_number,
+      })),
+  ];
+
+  const formatDate = (iso: string | null) => {
+    if (!iso) return "Completion date unavailable";
+    const date = new Date(iso);
+    if (Number.isNaN(date.getTime())) return "Completion date unavailable";
+    return date.toLocaleDateString("en-IN", {
       day: "numeric",
       month: "long",
       year: "numeric",
     });
+  };
 
   const badges = [
     { id: "1", title: "First Steps", description: "Completed 1st course", icon: "trophy", unlocked: completedCourses.length >= 1 },
     { id: "2", title: "Scholar", description: "Completed 3 courses", icon: "medal", unlocked: completedCourses.length >= 3 },
-    { id: "3", title: "Streak Master", description: "Maintained a streak", icon: "flash", unlocked: true },
-    { id: "4", title: "Perfect Score", description: "Got 100% on a quiz", icon: "ribbon", unlocked: true },
+    { id: "3", title: "Streak Master", description: "Maintained a streak", icon: "flash", unlocked: longestStreak > 0 },
+    { id: "4", title: "Perfect Score", description: "Got 100% on a quiz", icon: "ribbon", unlocked: false },
     { id: "5", title: "LMS Champion", description: "Completed 5 courses", icon: "school", unlocked: completedCourses.length >= 5 },
   ];
 
   const earnedBadgesCount = badges.filter(b => b.unlocked).length;
   const totalBadgesCount = badges.length;
-  const learningPoints = completedCourses.length * 100 + 50; // base points
+
   const progressPercent = Math.min((completedCourses.length / 3) * 100, 100);
 
   return (
@@ -204,8 +277,8 @@ export default function AchievementsScreen() {
             </View>
             <View style={styles.statDivider} />
             <View style={styles.statCol}>
-              <Text style={styles.statLabel}>POINTS</Text>
-              <Text style={styles.statValue}>{learningPoints} XP</Text>
+              <Text style={styles.statLabel}>COURSES</Text>
+              <Text style={styles.statValue}>{completedCourses.length}</Text>
             </View>
           </LinearGradient>
 
@@ -267,8 +340,12 @@ export default function AchievementsScreen() {
             Top Learners Leaderboard
           </Text>
           <View style={[styles.leaderboardCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
-            {leaderboard.length === 0 ? (
+            {leaderboardLoading ? (
               <ActivityIndicator size="small" color="#0B6FAD" style={{ padding: 16 }} />
+            ) : leaderboard.length === 0 ? (
+              <Text style={{ color: colors.mutedForeground, textAlign: "center", padding: 16 }}>
+                Leaderboard is currently unavailable.
+              </Text>
             ) : (
               leaderboard.map((item, idx) => {
                 const isMe = item.id === user?.id;
@@ -292,10 +369,6 @@ export default function AchievementsScreen() {
                     <Text style={[styles.leaderName, { color: isMe ? colors.primary : colors.foreground, fontWeight: isMe ? "700" : "500" }]} numberOfLines={1}>
                       {item.name} {isMe ? "(You)" : ""}
                     </Text>
-                    <View style={styles.xpBox}>
-                      <Ionicons name="flash" size={12} color="#F59E0B" style={{ marginRight: 2 }} />
-                      <Text style={[styles.xpText, { color: colors.foreground }]}>{item.xp} XP</Text>
-                    </View>
                   </View>
                 );
               })
@@ -305,7 +378,7 @@ export default function AchievementsScreen() {
           {/* Certificates Section */}
           <Text style={[styles.sectionTitle, TEXT_STYLES.sectionTitle, { color: colors.foreground, marginTop: 24 }]}>Certificates</Text>
 
-          {completedCourses.length === 0 ? (
+          {certificateCourses.length === 0 ? (
             <View style={[styles.emptyCertCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
               <Feather name="award" size={48} color={colors.mutedForeground} style={{ opacity: 0.3 }} />
               <Text style={[styles.emptyTitle, TEXT_STYLES.cardTitle, { color: colors.foreground }]}>
@@ -323,7 +396,7 @@ export default function AchievementsScreen() {
             </View>
           ) : (
             <View style={{ gap: 16 }}>
-              {completedCourses.map((course) => (
+              {certificateCourses.map((course) => (
                 <View
                   key={course.courseId}
                   style={[styles.certCard, { backgroundColor: colors.card, borderColor: colors.border }]}
@@ -352,7 +425,8 @@ export default function AchievementsScreen() {
                               courseId: course.courseId,
                               courseName: course.courseTitle,
                               studentName: user?.name ?? "",
-                              completionDate: course.completedAt,
+                              completionDate: course.completedAt ?? '',
+                              certNumber: course.certificateNumber ?? "",
                               level: (course as any).level,
                               instructor: (course as any).instructor,
                             },
@@ -374,7 +448,8 @@ export default function AchievementsScreen() {
                               courseId: course.courseId,
                               courseName: course.courseTitle,
                               studentName: user?.name ?? "",
-                              completionDate: course.completedAt,
+                              completionDate: course.completedAt ?? '',
+                              certNumber: course.certificateNumber ?? "",
                               autoDownload: "true",
                               level: (course as any).level,
                               instructor: (course as any).instructor,

@@ -1,4 +1,6 @@
 import { apiClient } from '@/lib/auth/apiClient';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { cacheManager } from '@/services/cacheManager';
 
 export interface CourseModuleItem {
   id: string;
@@ -28,6 +30,22 @@ export async function getCourseById(courseId: string | number) {
       return null;
     }
 
+    // M-23: remember public course metadata for offline use.
+    cacheManager.write(`course_meta:${courseId}`, raw).catch(() => false);
+    return mapCourse(raw);
+  } catch (error: any) {
+    if (error?.status === 404) {
+      return null;
+    }
+    const cachedRaw = await cacheManager.read<any>(`course_meta:${courseId}`, Number.MAX_SAFE_INTEGER).catch(() => null);
+    if (cachedRaw?.id) return mapCourse(cachedRaw);
+    console.error(`[courseDataProvider] Error fetching course ${courseId}:`, error);
+    throw error;
+  }
+}
+
+function mapCourse(raw: any) {
+  {
     return {
       id: String(raw.id),
       title: raw.title || 'Untitled Course',
@@ -41,12 +59,6 @@ export async function getCourseById(courseId: string | number) {
       images: raw.images || [],
       is_published: raw.is_published !== undefined ? Boolean(raw.is_published) : true,
     };
-  } catch (error: any) {
-    if (error?.status === 404) {
-      return null;
-    }
-    console.error(`[courseDataProvider] Error fetching course ${courseId}:`, error);
-    throw error;
   }
 }
 
@@ -55,11 +67,23 @@ export async function getCourseModules(courseId: string | number): Promise<Cours
     return [];
   }
 
+  // M-23 (2026-11-10): network failures no longer turn into an empty course.
+  // The last good structure is cached per user + course and used offline. If
+  // there is no cached copy, the error is thrown so screens can show an offline state.
+  const settled = await Promise.allSettled([
+    apiClient.get<any>('/modules'),
+    apiClient.get<any>('/lessons'),
+  ]);
+  if (settled.some((r) => r.status === 'rejected')) {
+    const cached = await readCourseStructure(courseId);
+    if (cached) return cached;
+    const err = (settled.find((r) => r.status === 'rejected') as PromiseRejectedResult).reason;
+    console.warn(`[courseDataProvider] Course structure unavailable for ${courseId}:`, err?.message ?? err);
+    throw err;
+  }
+
   try {
-    const [modulesResponse, lessonsResponse] = await Promise.all([
-      apiClient.get<any>('/modules').catch(() => []),
-      apiClient.get<any>('/lessons').catch(() => []),
-    ]);
+    const [modulesResponse, lessonsResponse] = settled.map((r) => (r as PromiseFulfilledResult<any>).value);
 
     const rawModules = Array.isArray(modulesResponse)
       ? modulesResponse
@@ -75,7 +99,7 @@ export async function getCourseModules(courseId: string | number): Promise<Cours
 
     if (courseModules.length === 0) return [];
 
-    return courseModules.map((m: any) => {
+    const structure: CourseModuleItem[] = courseModules.map((m: any) => {
       const moduleLessons = rawLessons
         .filter((l: any) => Number(l.module_id) === Number(m.id))
         .sort((a: any, b: any) => (a.order_index ?? a.order ?? 0) - (b.order_index ?? b.order ?? 0));
@@ -95,9 +119,58 @@ export async function getCourseModules(courseId: string | number): Promise<Cours
         })),
       };
     });
+    writeCourseStructure(courseId, structure).catch(() => {});
+    return structure;
   } catch (error) {
     console.error(`[courseDataProvider] Error fetching modules for course ${courseId}:`, error);
     return [];
+  }
+}
+
+// ── M-23: per-user course-structure cache ───────────────────────────────────
+// Stored under "course_structure:<courseId>::<userId>". Raw video URLs are never
+// cached: they are replaced by a marker, because playback and downloads always
+// fetch a fresh signed URL. Cleared on logout (clearCourseStructureCache).
+export const PROTECTED_VIDEO_MARKER = '__protected__';
+const STRUCTURE_PREFIX = 'course_structure:';
+
+function structureKey(courseId: string | number): string | null {
+  const owner = cacheManager.userScope().owner;
+  return owner ? `${STRUCTURE_PREFIX}${courseId}::${owner}` : null;
+}
+
+export function toCacheableStructure(structure: CourseModuleItem[]): CourseModuleItem[] {
+  return structure.map((m) => ({
+    ...m,
+    lessons: m.lessons.map((l) => ({ ...l, video_url: l.video_url ? PROTECTED_VIDEO_MARKER : '' })),
+  }));
+}
+
+async function writeCourseStructure(courseId: string | number, structure: CourseModuleItem[]) {
+  const key = structureKey(courseId);
+  if (!key) return;
+  await AsyncStorage.setItem(key, JSON.stringify({ v: 1, at: Date.now(), data: toCacheableStructure(structure) }));
+}
+
+async function readCourseStructure(courseId: string | number): Promise<CourseModuleItem[] | null> {
+  const key = structureKey(courseId);
+  if (!key) return null;
+  try {
+    const raw = await AsyncStorage.getItem(key);
+    const parsed = raw ? JSON.parse(raw) : null;
+    return parsed?.v === 1 && Array.isArray(parsed.data) ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function clearCourseStructureCache(): Promise<void> {
+  try {
+    const keys = await AsyncStorage.getAllKeys();
+    const mine = keys.filter((k) => k.startsWith(STRUCTURE_PREFIX));
+    if (mine.length) await AsyncStorage.multiRemove(mine);
+  } catch {
+    // best effort
   }
 }
 

@@ -32,18 +32,20 @@ import { cacheManager } from "@/services/cacheManager";
 import { QUIZZES } from "@/data/mockData";
 import { useColors } from "@/hooks/useColors";
 import { useAuth } from "@/context/AuthContext";
-import { useCart } from "@/context/CartContext";
 import { useFavorites } from "@/context/FavoritesContext";
 import { useRequireAuth } from "@/context/AuthRequireContext";
 import { getCourseById, getCourseModules } from "@/services/courseDataProvider";
-import { enrollInCourse, getEnrollment, isExpired } from "@/services/enrollmentService";
+import { enrollInCourse, getEnrollment, isExpired, clearEnrollmentCache } from "@/services/enrollmentService";
 import { fetchCourseLessonsProgress } from "@/lib/progressStorage";
 import { fetchCourseReviews, fetchMyReview, upsertReview } from "@/services/reviewService";
 import { parseThumbnailUrls } from "@/lib/thumbnailUtils";
 import { homeRepository } from "@/repositories/homeRepository";
 import { coursesRepository } from "@/repositories/coursesRepository";
-import { productService } from "@/services/productService";
+// C-5 (2026-11-10): no in-app purchase of digital courses (consumption-only release).
+import { DIGITAL_COURSE_PURCHASES_IN_APP } from "@/constants/commerce";
+import { decideCourseCta, isFreeCourse, coursePriceLabel, hasActiveAccess } from "@/lib/courseAccess";
 import { fetchCourseKit, CourseKitResponse } from "@/services/courseKitService";
+import { CourseKitCard } from "@/components/CourseKitCard";
 
 export default function CourseDetailScreen() {
   const colors = useColors();
@@ -53,7 +55,7 @@ export default function CourseDetailScreen() {
   const id = rawId && rawId !== 'undefined' && rawId !== 'null' ? rawId : undefined;
   const { user } = useAuth();
   const { isFavoriteCourse, toggleFavoriteCourse } = useFavorites();
-  const { addToCart, items: cartItems } = useCart();
+
   const { requireAuth } = useRequireAuth();
 
   const [course, setCourse] = useState<any>(null);
@@ -256,7 +258,10 @@ export default function CourseDetailScreen() {
         // 4. Enrollment & Progress
         if (enrollmentRes.status === 'fulfilled' && user?.id) {
           const enrollmentData = enrollmentRes.value;
-          const enrolledStatus = Boolean(enrollmentData);
+          // B-2 alignment: "enrolled" means active access (allow-listed status,
+          // not expired), as on the backend. Inactive rows stay in `enrollment`
+          // so the CTA can show "expired" or offer free re-enrollment.
+          const enrolledStatus = hasActiveAccess(enrollmentData, enrollmentData?.courses);
 
           setEnrollmentStatusKnown(true);
           setEnrollmentCheckFailed(false);
@@ -362,6 +367,16 @@ export default function CourseDetailScreen() {
     );
   }
 
+  // C-5 / L-21: one decision for the CTA and lesson gating (allow-listed statuses, expiry).
+  const courseCta = decideCourseCta({
+    signedIn: !!user?.id,
+    enrollmentKnown: enrollmentStatusKnown || isEnrolled,
+    enrollmentCheckFailed,
+    enrollment: enrollment ?? (isEnrolled && isFreeCourse(course) ? { payment_status: "free" } : null),
+    course,
+  });
+  const hasAccess = courseCta.kind === "continue";
+
   const handleFavoriteToggle = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     requireAuth(() => {
@@ -386,66 +401,20 @@ export default function CourseDetailScreen() {
       setIsEnrolling(true);
 
       try {
-        if (!course.isFree) {
-          const { products } = await productService.getProducts({ limit: 100 });
-          const linkedProduct = products.find((p) => Number(p.course_id) === Number(course.id));
-
-          if (!linkedProduct) {
-            // No linked product row — create a virtual product from the course itself
-            // so the user can still proceed to checkout.
-            const virtualProduct: any = {
-              id: `course_${course.id}`,
-              title: course.title,
-              category: "digital",
-              subcategory: "Courses",
-              price: course.price,
-              originalPrice: course.price,
-              thumbnail: course.thumbnail,
-              description: course.description,
-              rating: 4.8,
-              reviews: 0,
-              inStock: true,
-              features: [],
-              is_course: true,
-              course_id: String(course.id),
-            };
-            if (!cartItems.some((i) => i.product.id === virtualProduct.id)) {
-              addToCart(virtualProduct);
-            }
-            router.push("/store/checkout");
-            return;
-          }
-
-          const productForCart: any = {
-            id: String(linkedProduct.id),
-            title: linkedProduct.title || course.title,
-            category: "digital",
-            subcategory: linkedProduct.subcategory || "Courses",
-            price: Number(linkedProduct.price) || course.price,
-            originalPrice: Number(linkedProduct.originalPrice) || Number(linkedProduct.price) || course.price,
-            thumbnail: linkedProduct.thumbnail || course.thumbnail,
-            description: linkedProduct.description || course.description,
-            rating: 4.8,
-            reviews: 0,
-            inStock: linkedProduct.inStock,
-            features: linkedProduct.features || [],
-            is_course: true,
-            course_id: String(course.id),
-          };
-
-          if (!cartItems.some((i) => i.product.id === productForCart.id)) {
-            addToCart(productForCart);
-          }
-          router.push("/store/checkout");
+        // C-5: only FREE courses can be enrolled in-app. Paid courses are
+        // unlocked by a website purchase and verified by the backend.
+        if (!isFreeCourse(course) || DIGITAL_COURSE_PURCHASES_IN_APP) {
           return;
         }
-
-        await enrollInCourse(user.id, course.id, course.isFree);
+        await enrollInCourse(user.id, course.id, true);
         await Promise.all([
           homeRepository.invalidateProgressCache().catch(() => {}),
           coursesRepository.invalidateEnrollmentsCache().catch(() => {}),
         ]);
         setIsEnrolled(true);
+        // A re-enrollment updates an existing (expired/pending) row: reload it
+        // so the CTA does not keep deciding from the stale inactive row.
+        setEnrollment(await getEnrollment(user.id, course.id).catch(() => null));
 
         const progressData = await fetchCourseLessonsProgress(user.id, course.id);
         setLessonsProgress(progressData);
@@ -479,6 +448,21 @@ export default function CourseDetailScreen() {
         const status = error?.status ?? error?.data?.statusCode ?? error?.response?.status;
 
         if (status === 409) {
+          clearEnrollmentCache();
+          const fresh = await getEnrollment(user.id, course.id).catch(() => null);
+          if (!hasActiveAccess(fresh, fresh?.courses)) {
+            // 409 for an inactive row: the server could not renew it (e.g. a
+            // backend without B-2). Do not pretend the student has access.
+            setEnrollment(fresh);
+            setEnrollmentStatusKnown(true);
+            Alert.alert(
+              "Enrollment Not Renewed",
+              "We couldn't renew your access to this course. Please contact support.",
+              [{ text: "OK" }]
+            );
+            return;
+          }
+          setEnrollment(fresh);
           setIsEnrolled(true);
           setEnrollmentStatusKnown(true);
           setEnrollmentCheckFailed(false);
@@ -654,122 +638,8 @@ export default function CourseDetailScreen() {
             ))}
           </View>
 
-          {/* Course kit */}
-          {courseKit?.kit && (
-            <View style={{
-              marginTop: 16,
-              marginBottom: 16,
-              padding: 14,
-              borderRadius: 14,
-              borderWidth: 1,
-              borderColor: colors.border,
-              backgroundColor: colors.background,
-              gap: 12,
-            }}>
-              <View style={{
-                alignSelf: "flex-start",
-                backgroundColor: courseKit.kit_included ? "#DCFCE7" : "#FEF3C7",
-                paddingHorizontal: 10,
-                paddingVertical: 6,
-                borderRadius: 20,
-              }}>
-                <Text style={{
-                  color: courseKit.kit_included ? "#166534" : "#92400E",
-                  fontSize: 12,
-                  fontFamily: "Inter_600SemiBold",
-                }}>
-                  {courseKit.kit_included ? "Kit included with course" : "Kit sold separately"}
-                </Text>
-              </View>
-
-              <Text style={{
-                color: colors.foreground,
-                fontSize: 18,
-                fontFamily: "Inter_600SemiBold",
-              }}>
-                {courseKit.kit.name}
-              </Text>
-
-              {!!courseKit.kit.description && (
-                <Text style={{ color: colors.mutedForeground, fontSize: 14 }}>
-                  {courseKit.kit.description}
-                </Text>
-              )}
-
-              {courseKit.kit.items.map((item) => (
-                <View key={item.product_id} style={{
-                  flexDirection: "row",
-                  alignItems: "center",
-                  gap: 10,
-                  paddingVertical: 6,
-                }}>
-                  {item.image ? (
-                    <Image
-                      source={{ uri: item.image }}
-                      style={{ width: 48, height: 48, borderRadius: 8, backgroundColor: colors.muted }}
-                      resizeMode="cover"
-                      onError={() => {
-                        setCourseKit((current) => current ? ({
-                          ...current,
-                          kit: current.kit ? {
-                            ...current.kit,
-                            items: current.kit.items.map((entry) =>
-                              entry.product_id === item.product_id ? { ...entry, image: null } : entry
-                            ),
-                          } : null,
-                        }) : null);
-                      }}
-                    />
-                  ) : (
-                    <View style={{
-                      width: 48,
-                      height: 48,
-                      borderRadius: 8,
-                      backgroundColor: colors.muted,
-                      alignItems: "center",
-                      justifyContent: "center",
-                    }}>
-                      <Ionicons name="cube-outline" size={22} color={colors.mutedForeground} />
-                    </View>
-                  )}
-
-                  <View style={{ flex: 1, gap: 3 }}>
-                    <Text numberOfLines={2} style={{
-                      color: colors.foreground,
-                      fontSize: 14,
-                      fontFamily: "Inter_600SemiBold",
-                    }}>
-                      {item.title}
-                    </Text>
-                    <Text style={{ color: colors.mutedForeground, fontSize: 12 }}>
-                      {`Qty ${item.quantity}${!courseKit.kit_included && item.price != null ? ` · ₹${item.price} each` : ""}`}
-                    </Text>
-                    {!item.available && (
-                      <Text style={{ color: "#DC2626", fontSize: 12, fontFamily: "Inter_600SemiBold" }}>
-                        Out of stock
-                      </Text>
-                    )}
-                  </View>
-                </View>
-              ))}
-
-              {!courseKit.kit.all_available && (
-                <Text style={{ color: "#DC2626", fontSize: 13 }}>
-                  Some kit items are currently out of stock.
-                </Text>
-              )}
-
-              <Text style={{
-                color: colors.mutedForeground,
-                fontSize: 13,
-                lineHeight: 19,
-              }}>
-                {courseKit.kit_included
-                  ? "After you buy this course, confirm your shipping address to receive the kit at no extra cost."
-                  : "This course is free, but the kit isn't included. You can buy the kit separately from the Store."}
-              </Text>
-            </View>
-          )}
+          {/* Course kit: top of the details content, above tabs and description. */}
+          {courseKit?.kit && <CourseKitCard courseId={String(id)} courseKit={courseKit} />}
 
           {/* Tab bar */}
           <View style={styles.tabBar}>
@@ -868,7 +738,7 @@ export default function CourseDetailScreen() {
                       },
                     ]}
                     onPress={() => {
-                      if (isEnrolled) {
+                      if (hasAccess) {
                         router.push({ pathname: "/course/learn", params: { courseId: course.id, moduleId: mod.id } });
                       }
                     }}
@@ -904,7 +774,7 @@ export default function CourseDetailScreen() {
                         </View>
                       )}
                     </View>
-                    {isEnrolled ? (
+                    {hasAccess ? (
                       isCompleted ? (
                         <Ionicons name="checkmark-circle" size={22} color="#17E5D3" />
                       ) : (
@@ -938,7 +808,7 @@ export default function CourseDetailScreen() {
               )}
 
               {/* Quiz */}
-              {quiz && isEnrolled && (
+              {quiz && hasAccess && (
                 <>
                   <Text style={[styles.sectionTitle, { color: colors.foreground }]}>Quiz</Text>
                   <Pressable
@@ -1092,31 +962,7 @@ export default function CourseDetailScreen() {
           },
         ]}
       >
-        {isEnrolled && accessExpired ? (
-          <View style={{ gap: 8 }}>
-            <Text style={{ color: colors.mutedForeground, fontSize: 12, textAlign: "center", fontFamily: "Inter_400Regular" }}>
-              Your 1-year access expired on{" "}
-              {enrollment?.expires_at ? new Date(enrollment.expires_at).toLocaleDateString() : ""}
-            </Text>
-            <Pressable
-              style={[styles.ctaBtn, { backgroundColor: "#0B6FAD" }]}
-              onPress={() => {
-                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                Alert.alert(
-                  "Renew Access",
-                  `Renew "${course.title}" for another year at ₹${course.price}?`,
-                  [
-                    { text: "Cancel", style: "cancel" },
-                    { text: "Renew Now", onPress: () => router.push("/(tabs)/store") },
-                  ],
-                );
-              }}
-            >
-              <Ionicons name="refresh-circle" size={18} color="#FFF" />
-              <Text style={styles.ctaBtnText}>Renew Access · ₹{course.price}</Text>
-            </Pressable>
-          </View>
-        ) : isEnrolled ? (
+        {courseCta.kind === "continue" ? (
           <Pressable
             style={[styles.ctaBtn, { backgroundColor: "#0B6FAD" }]}
             onPress={() => {
@@ -1133,25 +979,33 @@ export default function CourseDetailScreen() {
               <Ionicons name="chevron-forward" size={18} color="#FFF" style={{ marginLeft: "auto" }} />
             </View>
           </Pressable>
-        ) : user?.id && !enrollmentStatusKnown ? (
+        ) : courseCta.kind === "checking" || courseCta.kind === "verify_failed" ? (
           <View style={{ paddingVertical: 12, alignItems: 'center' }}>
             <Text style={{ color: colors.mutedForeground, fontSize: 13, textAlign: 'center' }}>
-              {enrollmentCheckFailed ? 'Unable to verify enrollment. Pull down to refresh.' : 'Checking enrollment...'}
+              {courseCta.kind === "verify_failed" ? 'Unable to verify enrollment. Pull down to refresh.' : 'Checking enrollment...'}
             </Text>
           </View>
-        ) : (
+        ) : courseCta.kind === "expired" ? (
+          <View style={{ paddingVertical: 10, gap: 4 }} accessibilityRole="text">
+            <Text style={{ color: colors.foreground, fontSize: 14, textAlign: "center", fontFamily: "Inter_600SemiBold" }}>
+              Your access to this course has ended
+            </Text>
+            <Text style={{ color: colors.mutedForeground, fontSize: 12, textAlign: "center", fontFamily: "Inter_400Regular" }}>
+              {enrollment?.expires_at ? `Access ended on ${new Date(enrollment.expires_at).toLocaleDateString()}. ` : ""}
+              If your access has been extended, pull down to refresh.
+            </Text>
+          </View>
+        ) : courseCta.kind === "enroll_free" ? (
           <View style={styles.ctaRow}>
             <View style={{ justifyContent: "center" }}>
-              {course.isFree ? (
-                <Text style={[styles.ctaPrice, { color: colors.success }]}>Free</Text>
-              ) : (
-                <Text style={[styles.ctaPrice, { color: "#0B6FAD" }]}>₹{course.price}</Text>
-              )}
+              <Text style={[styles.ctaPrice, { color: colors.success }]}>Free</Text>
             </View>
             <Pressable
               style={{ flex: 1, height: 56 }}
               onPress={handleEnrollNow}
               disabled={isEnrolling}
+              accessibilityRole="button"
+              accessibilityLabel="Enroll in this free course"
             >
               <LinearGradient
                 colors={["#0B6FAD", "#17E5D3"]}
@@ -1160,11 +1014,28 @@ export default function CourseDetailScreen() {
                 style={styles.enrollGradientBtn}
               >
                 <Ionicons name="rocket" size={20} color="#FFF" style={{ marginRight: 4 }} />
-                <Text style={styles.enrollBtnText}>
-                  {isEnrolling ? "Enrolling..." : (course.isFree ? "Enroll for Free" : "Buy Now")}
-                </Text>
+                <Text style={styles.enrollBtnText}>{isEnrolling ? "Enrolling..." : "Enroll for Free"}</Text>
               </LinearGradient>
             </Pressable>
+          </View>
+        ) : courseCta.kind === "sign_in" ? (
+          <Pressable
+            style={[styles.ctaBtn, { backgroundColor: "#0B6FAD" }]}
+            onPress={() => requireAuth(() => loadCourseData(true))}
+            accessibilityRole="button"
+          >
+            <Ionicons name="log-in-outline" size={18} color="#FFF" />
+            <Text style={styles.ctaBtnText}>Sign in to access your courses</Text>
+          </Pressable>
+        ) : (
+          // not_owned: informational only. No price, purchase button or external link (C-5).
+          <View style={{ paddingVertical: 10, gap: 4 }} accessibilityRole="text">
+            <Text style={{ color: colors.foreground, fontSize: 14, textAlign: "center", fontFamily: "Inter_600SemiBold" }}>
+              {coursePriceLabel(course)} course
+            </Text>
+            <Text style={{ color: colors.mutedForeground, fontSize: 12, textAlign: "center", fontFamily: "Inter_400Regular" }}>
+              This course is not available on this account. If you already have access, make sure you are signed in with the same account, then pull down to refresh.
+            </Text>
           </View>
         )}
       </View>

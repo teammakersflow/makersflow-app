@@ -1,3 +1,4 @@
+import { isDeleteConfirmationValid, isDeletionConfirmed } from "@/lib/accountDeletion";
 import { Ionicons } from "@expo/vector-icons";
 import { useTabSwipe } from "@/hooks/useTabSwipe";
 import * as Haptics from "expo-haptics";
@@ -30,7 +31,6 @@ import { notificationService } from "@/services/notificationService";
 import { announcementService } from "@/services/announcementService";
 import { getCourseModules } from "@/services/courseDataProvider";
 import { completeCourse, fetchEnrolledCourses } from "@/services/enrollmentService";
-import { issueCertificate } from "@/services/certificateService";
 import { fetchCourseProgress } from "@/lib/progressStorage";
 import { ProductCard } from "@/components/ProductCard";
 import { CertificateSkeleton, WishlistSkeleton } from "@/components/SkeletonLoader";
@@ -175,7 +175,6 @@ export default function ProfileScreen() {
             if (prog.total > 0 && prog.completed >= prog.total) {
               // Auto-persist completed_at to DB so future queries find it on the enrollment row
               completeCourse(user.id, courseId).catch(() => {});
-              issueCertificate(courseId).catch(() => {});
               results.push({
                 courseId,
                 courseTitle,
@@ -250,9 +249,13 @@ export default function ProfileScreen() {
     setDeleteModalVisible(true);
   };
 
+  // Account deletion (Play readiness, 2026-11-10): the old password re-entry
+  // step never verified anything, and Google-only accounts have no password.
+  // It is now an explicit typed confirmation. The deletion request itself
+  // (DELETE /users/me, authorised by the session token) is unchanged.
   const handleVerifyPassword = async () => {
-    if (!deletePassword) {
-      setDeleteError("Please enter your password");
+    if (!isDeleteConfirmationValid(deletePassword)) {
+      setDeleteError('Type DELETE to confirm');
       return;
     }
     try {
@@ -268,7 +271,14 @@ export default function ProfileScreen() {
     setIsDeleting(true);
     setDeleteError("");
     try {
-      await customAuthService.deleteAccount();
+      // The typed confirmation is only a UI safeguard against accidental taps; it
+      // is NOT authentication. The request is authorised solely by the session
+      // bearer token, and the server must derive the user from that token.
+      const result = await customAuthService.deleteAccount();
+      // Only report deletion when the server confirms it.
+      if (!isDeletionConfirmed(result)) {
+        throw new Error((result as any)?.message || "Account deletion was not confirmed by the server. Please try again.");
+      }
       setDeleteModalVisible(false);
       await logout();
       router.replace("/(tabs)");
@@ -695,13 +705,13 @@ export default function ProfileScreen() {
             {deleteStep === "password" ? (
               <>
                 <View style={styles.modalHeader}>
-                  <Text style={[styles.modalTitle, { color: colors.foreground }]}>Verify Identity</Text>
+                  <Text style={[styles.modalTitle, { color: colors.foreground }]}>Confirm account deletion</Text>
                   <Pressable onPress={() => setDeleteModalVisible(false)} disabled={isDeleting}>
                     <Ionicons name="close" size={24} color={colors.mutedForeground} />
                   </Pressable>
                 </View>
                 <Text style={[styles.modalSubtitle, { color: colors.mutedForeground }]}>
-                  Please re-enter your password to continue with account deletion.
+                  This permanently deletes your account and learning progress. Type DELETE to continue.
                 </Text>
                 
                 <View style={[
@@ -718,17 +728,15 @@ export default function ProfileScreen() {
                 ]}>
                   <TextInput
                     style={[{ color: colors.foreground, flex: 1, fontSize: 16, fontFamily: "Inter_400Regular" }]}
-                    placeholder="Password"
+                    placeholder="Type DELETE"
                     placeholderTextColor={colors.mutedForeground}
-                    secureTextEntry={!showDeletePassword}
+                    autoCorrect={false}
+                    accessibilityLabel="Type DELETE to confirm account deletion"
                     value={deletePassword}
                     onChangeText={setDeletePassword}
                     autoCapitalize="none"
                     editable={!isDeleting}
                   />
-                  <Pressable onPress={() => setShowDeletePassword(!showDeletePassword)} style={{ paddingLeft: 10 }}>
-                    <Ionicons name={showDeletePassword ? "eye-off" : "eye"} size={20} color={colors.mutedForeground} />
-                  </Pressable>
                 </View>
                 
                 {deleteError ? <Text style={styles.errorText}>{deleteError}</Text> : null}
@@ -738,7 +746,7 @@ export default function ProfileScreen() {
                   onPress={handleVerifyPassword}
                   disabled={isDeleting}
                 >
-                  {isDeleting ? <ActivityIndicator color="#FFF" /> : <Text style={styles.modalBtnText}>Verify Password</Text>}
+                  {isDeleting ? <ActivityIndicator color="#FFF" /> : <Text style={styles.modalBtnText}>Continue</Text>}
                 </Pressable>
               </>
             ) : (

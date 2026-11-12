@@ -42,7 +42,7 @@ const queryClient = new QueryClient();
 
 function RootLayoutNav() {
   const colors = useColors();
-  const { isConnected } = useNetwork();
+  const { isInternetReachable, refreshNetwork } = useNetwork();
   const { user, isLoading: isAuthLoading } = useAuth();
   
   const [hasEverLoaded, setHasEverLoaded] = React.useState<boolean | null>(null);
@@ -57,14 +57,32 @@ function RootLayoutNav() {
     visible: false,
     title: "",
   });
+  const alertQueue = React.useRef<{ visible: boolean; title: string; message?: string; buttons?: any[] }[]>([]);
+  const closeAlert = React.useCallback(() => {
+    const next = alertQueue.current.shift();
+    setAlertConfig(next ?? { visible: false, title: "" });
+  }, []);
+  const alertModal = (
+    <CustomAlertModal
+      visible={alertConfig.visible}
+      title={alertConfig.title}
+      message={alertConfig.message}
+      buttons={alertConfig.buttons}
+      onClose={closeAlert}
+    />
+  );
 
   useEffect(() => {
+    // L-17: alerts are queued, so an alert raised while another is visible is
+    // shown afterwards instead of replacing it and losing its callbacks.
     globalShowAlert = (title, message, buttons) => {
-      setAlertConfig({
-        visible: true,
-        title,
-        message,
-        buttons,
+      const next = { visible: true, title: String(title ?? ""), message, buttons };
+      setAlertConfig((prev) => {
+        if (prev.visible) {
+          alertQueue.current.push(next);
+          return prev;
+        }
+        return next;
       });
     };
     return () => {
@@ -88,39 +106,68 @@ function RootLayoutNav() {
   }, [fontsLoaded, fontError]);
 
   useEffect(() => {
-    AsyncStorage.getItem("app_has_ever_loaded").then((val) => {
-      setHasEverLoaded(val === "true");
-    });
+    let isActive = true;
+
+    AsyncStorage.getItem("app_has_ever_loaded")
+      .then((val) => {
+        if (isActive) {
+          setHasEverLoaded(val === "true");
+        }
+      })
+      .catch((error) => {
+        console.warn("[Startup] Failed to read app launch state:", error);
+        if (isActive) {
+          setHasEverLoaded(true);
+        }
+      });
+
+    return () => {
+      isActive = false;
+    };
   }, []);
 
   useEffect(() => {
-    if (fontsLoaded && isConnected && !isAuthLoading && hasEverLoaded === false) {
-      AsyncStorage.setItem("app_has_ever_loaded", "true");
+    if ((fontsLoaded || fontError) && isInternetReachable === true && !isAuthLoading && hasEverLoaded === false) {
       setHasEverLoaded(true);
+
+      void AsyncStorage.setItem("app_has_ever_loaded", "true").catch((error) => {
+        console.warn("[Startup] Failed to save app launch state:", error);
+      });
     }
-  }, [fontsLoaded, isConnected, isAuthLoading, hasEverLoaded]);
+  }, [fontsLoaded, fontError, isInternetReachable, isAuthLoading, hasEverLoaded]);
 
   const handleRetry = async () => {
     setIsChecking(true);
-    setTimeout(() => {
+    try {
+      await refreshNetwork();
+    } catch (error) {
+      console.warn("[Startup] Network refresh failed:", error);
+    } finally {
       setIsChecking(false);
-    }, 1500);
+    }
   };
 
-  if (!fontsLoaded || hasEverLoaded === null) {
-    return <View style={{ flex: 1, backgroundColor: '#F4FAFD' }} />;
+  // M-31: if fonts fail to load, continue with system fonts instead of
+  // staying on a blank view forever (the splash is already hidden on fontError).
+  if ((!fontsLoaded && !fontError) || hasEverLoaded === null) {
+    return <View style={{ flex: 1, backgroundColor: '#F4FAFD' }}>{alertModal}</View>;
   }
 
   // Level 1: startup failure condition
-  // isConnected === null means "checking" — don't show offline screen yet
+  // isInternetReachable === null means "checking" - don't show offline screen yet
   const showStartupOfflineScreen = 
-    isConnected === false && // explicit false, not null (null = still checking)
+    isInternetReachable === false && // explicit false, not null (null = still checking)
     !isAuthLoading && 
     !user && 
     hasEverLoaded === false;
 
   if (showStartupOfflineScreen) {
-    return <OfflineScreen onRetry={handleRetry} isChecking={isChecking} />;
+    return (
+      <>
+        <OfflineScreen onRetry={handleRetry} isChecking={isChecking} />
+        {alertModal}
+      </>
+    );
   }
 
   return (
@@ -162,13 +209,7 @@ function RootLayoutNav() {
         <Stack.Screen name="notifications" options={{ headerShown: false }} />
         <Stack.Screen name="certificate" options={{ headerShown: false }} />
       </Stack>
-      <CustomAlertModal
-        visible={alertConfig.visible}
-        title={alertConfig.title}
-        message={alertConfig.message}
-        buttons={alertConfig.buttons}
-        onClose={() => setAlertConfig((prev) => ({ ...prev, visible: false }))}
-      />
+      {alertModal}
     </>
   );
 }
@@ -288,8 +329,11 @@ function CustomAlertModal({ visible, title, message, buttons, onClose }: CustomA
           {/* Action Buttons Row */}
           <View style={[alertStyles.alertBtnRow, { flexDirection: alertButtons.length > 2 ? "column" : "row" }]}>
             {alertButtons.map((btn, index) => {
-              const isDestructive = btn.style === "destructive" || btn.text.toLowerCase().includes("delete") || btn.text.toLowerCase().includes("clear") || btn.text.toLowerCase().includes("remove");
-              const isCancel = btn.style === "cancel" || btn.text.toLowerCase().includes("cancel");
+              // L-17: a button without text must not crash the app.
+              const label = String(btn?.text ?? "OK");
+              const lower = label.toLowerCase();
+              const isDestructive = btn.style === "destructive" || lower.includes("delete") || lower.includes("clear") || lower.includes("remove");
+              const isCancel = btn.style === "cancel" || lower.includes("cancel");
 
               let btnBgColor = "#0B6FAD";
               let btnTextColor = "#FFF";
@@ -325,7 +369,7 @@ function CustomAlertModal({ visible, title, message, buttons, onClose }: CustomA
                     }
                   }}
                 >
-                  <Text style={[alertStyles.alertBtnText, { color: btnTextColor }]}>{btn.text}</Text>
+                  <Text style={[alertStyles.alertBtnText, { color: btnTextColor }]}>{label}</Text>
                 </Pressable>
               );
             })}

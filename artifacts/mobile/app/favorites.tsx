@@ -1,3 +1,4 @@
+import { coursePriceLabel } from "@/lib/courseAccess";
 import { Ionicons } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
 import * as Haptics from "expo-haptics";
@@ -175,40 +176,10 @@ export default function FavoritesScreen() {
                       {fav.courseTitle}
                     </Text>
                     <Text style={[styles.lessonCourse, { color: "#0B6FAD", marginTop: 2 }]}>
-                      {fav.isFree ? "Free" : `₹${fav.price}`}
+                      {coursePriceLabel({ isFree: fav.isFree, price: fav.price })}
                     </Text>
 
-                    {/* Move to Cart Deep Sea Pill */}
-                    {!fav.isFree && (
-                      <Pressable
-                        style={styles.moveToCartBtn}
-                        onPress={(e) => {
-                          e.stopPropagation();
-                          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-                          const productForCart: any = {
-                            id: String(fav.courseId),
-                            title: fav.courseTitle,
-                            category: "digital",
-                            subcategory: fav.category || "Courses",
-                            price: Number(fav.price) || 0,
-                            originalPrice: Number(fav.price) || 0,
-                            thumbnail: fav.courseThumbnail,
-                            description: "",
-                            rating: 4.8,
-                            reviews: 0,
-                            inStock: true,
-                            features: [],
-                            is_course: true,
-                            course_id: String(fav.courseId),
-                          };
-                          addToCart(productForCart);
-                          Alert.alert("Added to Cart", `"${fav.courseTitle}" added to your cart.`);
-                        }}
-                      >
-                        <Ionicons name="cart" size={14} color="#FFF" />
-                        <Text style={styles.moveToCartText}>Move to Cart</Text>
-                      </Pressable>
-                    )}
+                    {/* C-5: courses cannot be bought in-app; the add-to-cart action for courses was removed. */}
                   </View>
                   <Pressable
                     style={styles.removeButton}

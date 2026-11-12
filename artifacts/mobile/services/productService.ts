@@ -1,3 +1,4 @@
+import { DIGITAL_COURSE_PURCHASES_IN_APP, isPhysicalStoreProduct } from "@/constants/commerce";
 import { apiClient } from '@/lib/auth/apiClient';
 import { Product } from '@/data/mockData';
 import { firstThumbnailUrl } from '@/lib/thumbnailUtils';
@@ -184,7 +185,10 @@ export const productService = {
       totalPages: rawPagination?.totalPages ?? (rawList.length > 0 ? 1 : 0),
     };
 
-    const products = rawList.map((row: any, idx: number) => mapBackendProduct(row, idx));
+    // C-5: digital goods (courses, notes, premium resources) are not sold in-app.
+    const products = rawList
+      .map((row: any, idx: number) => mapBackendProduct(row, idx))
+      .filter((p: Product) => DIGITAL_COURSE_PURCHASES_IN_APP || isPhysicalStoreProduct(p as any));
 
     return {
       products,

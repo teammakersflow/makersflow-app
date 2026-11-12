@@ -1,3 +1,4 @@
+import { safeInAppLink } from "@/lib/notificationRouting";
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import { router } from "expo-router";
@@ -197,9 +198,11 @@ export default function NotificationsScreen() {
 
   async function handlePress(n: AppNotification) {
     if (!n.is_read) await markRead(n);
-    if (n.link) {
+    // L-18: notification links come from the server; route only to known in-app paths.
+    const link = safeInAppLink(n.link);
+    if (link) {
       try {
-        router.push(n.link as any);
+        router.push(link as any);
       } catch {
         // invalid link
       }

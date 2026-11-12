@@ -14,6 +14,7 @@ import {
   Modal,
   StatusBar,
   ActivityIndicator,
+  AppState,
 } from "react-native";
 import Slider from "@react-native-community/slider";
 const SliderComponent = Slider as any;
@@ -21,6 +22,7 @@ import { useColors } from "@/hooks/useColors";
 import { SPACING } from "@/constants/spacing";
 import { PlaybackSpeedSelector } from "./PlaybackSpeedSelector";
 import { router } from "expo-router";
+import { createPlaybackTracker, type PlaybackEffects } from "@/lib/playbackTracker";
 
 const devLog = (...args: any[]) => {
   if (__DEV__) console.log(...args);
@@ -70,6 +72,7 @@ export function VideoPlayerEnhanced({
   const currentVideoUrlRef = useRef(videoUrl);
   const refreshVideoUrlRef = useRef(onRefreshVideoUrl);
   const isReplacingSourceRef = useRef(false);
+  const resumeAfterReplaceRef = useRef<number | null>(null);
 
   useEffect(() => {
     refreshVideoUrlRef.current = onRefreshVideoUrl;
@@ -92,6 +95,13 @@ export function VideoPlayerEnhanced({
 
       if (!isMounted.current || !player) return false;
 
+      // H-8: remember the position so playback resumes after the source swap.
+      try {
+        const at = Number(player.currentTime);
+        resumeAfterReplaceRef.current = Number.isFinite(at) && at > 1 ? at : null;
+      } catch {
+        resumeAfterReplaceRef.current = null;
+      }
       currentVideoUrlRef.current = source;
       player.replace(source);
       loadingSince.current = null;
@@ -206,8 +216,10 @@ export function VideoPlayerEnhanced({
   const [screenDims, setScreenDims] = useState(Dimensions.get("window"));
 
   const isMounted = useRef(true);
-  const hasEmittedComplete = useRef(false);
-  const lastSaveTime = useRef(0);
+  // M-20: save cadence, pause-save and one-shot completion (lib/playbackTracker.ts).
+  const trackerRef = useRef(createPlaybackTracker());
+  // M-17: latest position, so progress can be saved on pause, background and unmount.
+  const latestPosRef = useRef<{ t: number; d: number }>({ t: 0, d: 0 });
   const overlayOpacity = useRef(new Animated.Value(1)).current;
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const videoContainerRef = useRef<any>(null);
@@ -221,36 +233,23 @@ export function VideoPlayerEnhanced({
     }
   });
 
-
-  // TEMP DIAGNOSTICS: Native Expo Video playback events
+  // M-18: the resume position can arrive after the player was created (the
+  // resume prompt is answered after mount). Seek once when it does, unless
+  // the learner has already moved past the start.
+  const appliedInitialRef = useRef(initialTime > 30 ? initialTime : 0);
   useEffect(() => {
-    if (!player) return;
+    if (!player || !(initialTime > 30) || appliedInitialRef.current === initialTime) return;
+    appliedInitialRef.current = initialTime;
+    try {
+      if ((player.currentTime || 0) > 5) return;
+      if (player.status === "readyToPlay") player.currentTime = initialTime;
+      else resumeAfterReplaceRef.current = initialTime; // applied on readyToPlay
+    } catch {
+      /* player released */
+    }
+  }, [initialTime, player]);
 
-    console.warn("[VideoPlayer][DIAG] Player initialized", {
-      status: player.status,
-      playing: player.playing,
-    });
 
-    const statusSubscription = player.addListener("statusChange", (event) => {
-      console.warn("[VideoPlayer][DIAG] Status changed", {
-        status: event.status,
-        oldStatus: event.oldStatus,
-        error: event.error?.message ?? null,
-      });
-    });
-
-    const playingSubscription = player.addListener("playingChange", (event) => {
-      console.warn("[VideoPlayer][DIAG] Playing changed", {
-        isPlaying: event.isPlaying,
-        oldIsPlaying: event.oldIsPlaying,
-      });
-    });
-
-    return () => {
-      statusSubscription.remove();
-      playingSubscription.remove();
-    };
-  }, [player]);
   // Keep track of mounted state
   useEffect(() => {
     isMounted.current = true;
@@ -294,8 +293,10 @@ export function VideoPlayerEnhanced({
       ).catch(() => {});
     }
     return () => {
+      // M-21: the app is portrait-only (app.json / manifest). Re-lock portrait
+      // instead of unlocking, which let every other screen rotate.
       if (Platform.OS !== "web") {
-        ScreenOrientation.unlockAsync().catch(() => {});
+        ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
       }
     };
   }, []);
@@ -309,8 +310,7 @@ export function VideoPlayerEnhanced({
     if (videoUrl !== prevVideoUrl.current) {
       prevVideoUrl.current = videoUrl;
       currentVideoUrlRef.current = videoUrl;
-      hasEmittedComplete.current = false;
-      lastSaveTime.current = 0;
+      trackerRef.current.reset(); // M-20: new source, so new save/completion cycle
       lastStatusRef.current = "";
       retryCountRef.current = 0;
 
@@ -380,92 +380,112 @@ export function VideoPlayerEnhanced({
   useEffect(() => { onCompleteRef.current = onComplete; }, [onComplete]);
   useEffect(() => { onLoadingStateChangeRef.current = onLoadingStateChange; }, [onLoadingStateChange]);
 
+  // M-20 (2026-11-10): event-driven playback state. The 100/250 ms polling loop
+  // is gone; state changes only when expo-video reports one. Rules for saving
+  // and completion live in lib/playbackTracker.ts (unit-tested).
   useEffect(() => {
     if (!player) return;
+    const tracker = trackerRef.current;
+    tracker.reset();
 
-    const playingInterval = setInterval(() => {
-      try {
-        if (!isMounted.current || !player) {
-          clearInterval(playingInterval);
-          return;
-        }
-
-        const playing = player.playing;
-        const currentT = player.currentTime;
-        const durationT = player.duration;
-        const status = player.status;
-
-        // Only update isPlaying state if it actually changed to avoid
-        // unnecessary re-renders fighting with togglePlayPause
-        if (playing !== isPlayingRef.current) {
-          isPlayingRef.current = playing;
-          setIsPlaying(playing);
-        }
-        setCurrentTime(currentT);
-        setDuration(durationT);
-        setIsMuted(player.muted);
-        setVolume(player.volume);
-
-        const loading = status === "loading";
-        setIsLoading(loading);
-        onLoadingStateChangeRef.current?.(loading);
-
-        // Buffering watchdog — stuck in "loading" for too long
-        if (loading) {
-          if (loadingSince.current === null) loadingSince.current = Date.now();
-          else if (Date.now() - loadingSince.current > STALL_TIMEOUT_MS) setIsStalled(true);
-        } else {
-          loadingSince.current = null;
-          setIsStalled(false);
-        }
-
-        if (status !== lastStatusRef.current) {
-          lastStatusRef.current = status;
-
-          if (status === "readyToPlay") {
-            devLog(
-              "[VideoPlayer] Video ready - Status:",
-              status,
-              "Duration:",
-              durationT
-            );
-            retryCountRef.current = 0;
-            setRetryCount(0);
-            setHasError(false);
-            setIsRetrying(false);
-          }
-
-          if (status === "error") {
-            devError("[VideoPlayer] Video error detected");
-            handleVideoError();
-          }
-
-          setLastStatus(status);
-        }
-
-        // Save progress every 5 seconds
-        const now = Date.now();
-        if (playing && now - lastSaveTime.current >= 5000) {
-          onProgressUpdateRef.current?.(currentT, durationT);
-          lastSaveTime.current = now;
-        }
-
-        // Check completion threshold (90%)
-        const percentage = durationT > 0 ? (currentT / durationT) * 100 : 0;
-        if (percentage >= 90 && !hasEmittedComplete.current) {
-          onCompleteRef.current?.();
-          hasEmittedComplete.current = true;
-        }
-      } catch (err) {
-        devLog("[VideoPlayer] Player accessed after release / during unmount, ignoring:", err);
-        clearInterval(playingInterval);
+    const applyStatus = (status: string) => {
+      const loading = status === "loading";
+      setIsLoading(loading);
+      onLoadingStateChangeRef.current?.(loading);
+      if (loading) {
+        if (loadingSince.current === null) loadingSince.current = Date.now();
+      } else {
+        loadingSince.current = null;
+        setIsStalled(false);
       }
-    }, 100);
+      if (status === lastStatusRef.current) return;
+      lastStatusRef.current = status;
+      if (status === "readyToPlay") {
+        devLog("[VideoPlayer] Video ready");
+        retryCountRef.current = 0;
+        setRetryCount(0);
+        setHasError(false);
+        setIsRetrying(false);
+        try { tracker.setDuration(player.duration); setDuration(player.duration); } catch { /* released */ }
+        // H-8: after swapping in a refreshed signed URL, resume where the learner was.
+        if (resumeAfterReplaceRef.current !== null) {
+          const t = resumeAfterReplaceRef.current;
+          resumeAfterReplaceRef.current = null;
+          try { player.currentTime = t; } catch { /* ignore */ }
+        }
+      }
+      if (status === "error") {
+        devError("[VideoPlayer] Video error detected");
+        handleVideoError();
+      }
+      setLastStatus(status);
+    };
+
+    const applyEffects = (fx: PlaybackEffects) => {
+      if (fx.displayTime !== undefined) setCurrentTime(fx.displayTime);
+      if (fx.save) onProgressUpdateRef.current?.(fx.save.t, fx.save.d);
+      if (fx.complete) onCompleteRef.current?.();
+      latestPosRef.current = tracker.position;
+    };
+
+    try { player.timeUpdateEventInterval = 0.5; } catch { /* older native module */ }
+
+    const subs = [
+      player.addListener("timeUpdate", ({ currentTime: t }) => {
+        if (!isMounted.current) return;
+        let d = 0;
+        try { d = player.duration; } catch { /* released */ }
+        applyEffects(tracker.onTime(t, d));
+      }),
+      player.addListener("playingChange", ({ isPlaying: playingNow }) => {
+        if (!isMounted.current) return;
+        if (playingNow !== isPlayingRef.current) {
+          isPlayingRef.current = playingNow;
+          setIsPlaying(playingNow);
+        }
+        applyEffects(tracker.onPlaying(playingNow)); // M-17: save on pause
+      }),
+      player.addListener("statusChange", ({ status }) => {
+        if (isMounted.current) applyStatus(status);
+      }),
+      player.addListener("sourceLoad", ({ duration: d }) => {
+        if (!isMounted.current) return;
+        tracker.setDuration(d);
+        setDuration(d);
+      }),
+      player.addListener("mutedChange", ({ muted }) => { if (isMounted.current) setIsMuted(muted); }),
+      player.addListener("volumeChange", ({ volume: v }) => { if (isMounted.current) setVolume(v); }),
+    ];
+
+    // Initial snapshot (events only report changes).
+    try {
+      applyStatus(player.status);
+      setIsMuted(player.muted);
+      setVolume(player.volume);
+    } catch { /* released */ }
+
+    // Stall watchdog: a 1 s check of a ref, and state is set only when stalled.
+    const watchdog = setInterval(() => {
+      if (loadingSince.current !== null && Date.now() - loadingSince.current > STALL_TIMEOUT_MS) {
+        setIsStalled(true);
+      }
+    }, 1000);
 
     return () => {
-      clearInterval(playingInterval);
+      subs.forEach((sub) => sub.remove());
+      clearInterval(watchdog);
     };
-  }, [player]); // stable — only recreate when player instance changes
+  }, [player]); // only re-subscribe when the player instance changes
+
+  // M-17: save progress when the app goes to the background and when the player unmounts.
+  useEffect(() => {
+    const save = () => {
+      const { t, d } = latestPosRef.current;
+      if (t > 0) onProgressUpdateRef.current?.(t, d);
+    };
+    const sub = AppState.addEventListener("change", (s) => { if (s !== "active") save(); });
+    return () => { sub.remove(); save(); };
+  }, []);
 
   // Auto-hide effect
   useEffect(() => {
@@ -610,7 +630,7 @@ export function VideoPlayerEnhanced({
     try {
       // Read ground truth from player directly — never from stale React state
       const currentlyPlaying = player.playing;
-      console.warn("[VideoPlayer][DIAG] Play/Pause pressed", {
+      devLog("[VideoPlayer][DIAG] Play/Pause pressed", {
         playingBefore: currentlyPlaying,
         status: player.status,
         currentTime: player.currentTime,
@@ -624,10 +644,10 @@ export function VideoPlayerEnhanced({
       } else {
         if (isAtEnd) {
           player.currentTime = 0;
-          hasEmittedComplete.current = false;
+          trackerRef.current.reset();
         }
         player.play();
-      console.warn("[VideoPlayer][DIAG] player.play() called", {
+      devLog("[VideoPlayer][DIAG] player.play() called", {
         playingAfter: player.playing,
         status: player.status,
       });
@@ -742,9 +762,10 @@ export function VideoPlayerEnhanced({
           );
           devLog("[VideoPlayer] Entered fullscreen - landscape mode");
         } else {
-          await ScreenOrientation.unlockAsync();
+          // M-21: return to portrait, not "unlocked".
+          await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
           setIsFullscreen(false);
-          devLog("[VideoPlayer] Exited fullscreen - orientation unlocked");
+          devLog("[VideoPlayer] Exited fullscreen - portrait restored");
         }
       }
     } catch (error) {

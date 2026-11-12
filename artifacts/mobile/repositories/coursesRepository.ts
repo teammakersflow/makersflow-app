@@ -158,6 +158,8 @@ export const coursesRepository = {
     forceRefresh = false,
     onBackgroundUpdate?: (data: CoursesData) => void
   ): Promise<RepositoryResult<CoursesData>> {
+    // M-25: captured before any fetch; late writes for another account are dropped.
+    const scope = cacheManager.userScope();
     if (isOffline) {
       return coursesRepository.loadFromCache(userId);
     }
@@ -191,7 +193,7 @@ export const coursesRepository = {
           if (userId && enrollmentsStale && onBackgroundUpdate) {
             fetchEnrollments(userId)
               .then((newEnrollments) => {
-                cacheManager.write(STORAGE_KEYS.CACHED_COURSES_ENROLLMENTS, newEnrollments);
+                cacheManager.write(STORAGE_KEYS.CACHED_COURSES_ENROLLMENTS, newEnrollments, scope);
                 const newEnrolledIds = new Set(newEnrollments.map((e) => e.courseId));
                 onBackgroundUpdate({
                   catalog: catalogResult.data.filter((c) => !newEnrolledIds.has(c.id)),
@@ -209,13 +211,13 @@ export const coursesRepository = {
     }
 
     try {
-      const catalog = await fetchCatalog().catch(() => []);
+      const catalog = await fetchCatalog();
       cacheManager.write(STORAGE_KEYS.CACHED_COURSES_CATALOG, catalog);
 
       let enrollments: EnrolledCourseDetail[] = [];
       if (userId) {
-        enrollments = await fetchEnrollments(userId).catch(() => []);
-        cacheManager.write(STORAGE_KEYS.CACHED_COURSES_ENROLLMENTS, enrollments);
+        enrollments = await fetchEnrollments(userId);
+        cacheManager.write(STORAGE_KEYS.CACHED_COURSES_ENROLLMENTS, enrollments, scope);
       }
 
       const enrolledIds = new Set(enrollments.map((e) => e.courseId));

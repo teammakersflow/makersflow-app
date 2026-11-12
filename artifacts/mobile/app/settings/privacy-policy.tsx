@@ -59,7 +59,7 @@ export default function PrivacyPolicyScreen() {
 
         <Text style={[styles.subheading, { color: colors.foreground }]}>Payment Information</Text>
         <Text style={[styles.body, { color: colors.foreground }]}>
-          When you make purchases for courses or store items, payment processing is handled securely by Razorpay. MakersFlow does not store your credit card, debit card, or UPI credentials. We only receive transaction confirmation and order details from Razorpay.
+          When you buy physical store items in the app, payment processing is handled securely by Razorpay. MakersFlow does not store your credit card, debit card, or UPI credentials. We only receive transaction confirmation and order details from Razorpay.
         </Text>
 
         <Text style={[styles.subheading, { color: colors.foreground }]}>Device and Technical Information</Text>
@@ -72,7 +72,7 @@ export default function PrivacyPolicyScreen() {
         <Text style={[styles.bulletItem, { color: colors.foreground }]}>• Create and manage your account</Text>
         <Text style={[styles.bulletItem, { color: colors.foreground }]}>• Provide personalized learning experiences and course recommendations</Text>
         <Text style={[styles.bulletItem, { color: colors.foreground }]}>• Track your learning progress and award certificates or badges</Text>
-        <Text style={[styles.bulletItem, { color: colors.foreground }]}>• Process payments for course enrollments and store purchases</Text>
+        <Text style={[styles.bulletItem, { color: colors.foreground }]}>• Process payments for store purchases and provide access to the courses on your account</Text>
         <Text style={[styles.bulletItem, { color: colors.foreground }]}>• Send important notifications about course updates, streak reminders, and learning milestones</Text>
         <Text style={[styles.bulletItem, { color: colors.foreground }]}>• Improve our app functionality and user experience</Text>
         <Text style={[styles.bulletItem, { color: colors.foreground }]}>• Provide customer support and respond to your inquiries</Text>
@@ -108,7 +108,7 @@ export default function PrivacyPolicyScreen() {
           • <Text style={{ fontFamily: "Inter_600SemiBold" }}>Google</Text>: OAuth sign-in services (if you choose Google login). See Google's privacy policy at policies.google.com/privacy
         </Text>
         <Text style={[styles.bulletItem, { color: colors.foreground }]}>
-          • <Text style={{ fontFamily: "Inter_600SemiBold" }}>Razorpay</Text>: Payment processing for course purchases and store transactions. See Razorpay's privacy policy at razorpay.com/privacy
+          • <Text style={{ fontFamily: "Inter_600SemiBold" }}>Razorpay</Text>: Payment processing for store transactions. See Razorpay's privacy policy at razorpay.com/privacy
         </Text>
 
         <Text style={[styles.sectionTitle, { color: colors.foreground }]}>6. Refund & Replacement Policy</Text>

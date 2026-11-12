@@ -1,3 +1,8 @@
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { isPhysicalStoreProduct } from "@/constants/commerce";
+
+/** M-13: last Razorpay order started on this device (cleared once verified). */
+export const PENDING_PAYMENT_KEY = "store:pendingPayment";
 import { Ionicons } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
 import * as Haptics from "expo-haptics";
@@ -351,10 +356,10 @@ export default function CheckoutScreen() {
     }
 
     setShippingLoading(true);
-    // Weight per shipment — not multiplied by quantity
+    // M-15: shipment weight = unit weight × quantity (matches every server-side calculation).
     const totalWeight = physicalItems.reduce((s, i) => {
-      const w = (i.product as any).weight_kg ?? 0.5;
-      return s + w;
+      const w = Number((i.product as any).weight_kg) > 0 ? Number((i.product as any).weight_kg) : 0.5;
+      return s + w * Math.max(1, Number(i.quantity) || 1);
     }, 0);
     const physicalSubtotal = physicalItems.reduce((s, i) => s + i.product.price * i.quantity, 0);
 
@@ -540,7 +545,8 @@ export default function CheckoutScreen() {
     if (!/^\d{10}$/.test(rawPhone)) {
       Alert.alert("Validation Error", "Phone must be a 10-digit number after +91."); return;
     }
-    if (!/^\d{6}$/.test(formPostalCode.trim())) {
+    // L-24: Indian PIN codes never start with 0.
+    if (!/^[1-9]\d{5}$/.test(formPostalCode.trim())) {
       Alert.alert("Validation Error", "Pincode must be exactly 6 digits."); return;
     }
     if (!user?.id) return;
@@ -669,13 +675,10 @@ export default function CheckoutScreen() {
       return;
     }
 
-    const hasCourses = items.some((i) => (i.product as any).is_course);
-    if (hasCourses) {
-      if (!hasPhysical) {
-        Alert.alert("Course Purchase", "Digital courses require the separate course enrollment flow. Please enroll directly on the course screen.");
-      } else {
-        Alert.alert("Mixed Cart", "Your cart contains both courses and physical products. The store payment flow currently supports physical products only. Please remove courses to proceed with store checkout.");
-      }
+    // C-5: only physical products can be bought in-app. Digital goods are not sold here.
+    const hasDigital = items.some((i) => !isPhysicalStoreProduct(i.product as any));
+    if (hasDigital) {
+      Alert.alert("Item unavailable", "Some items in your cart are not available for purchase in the app. Please remove them to continue.");
       setLoading(false);
       return;
     }
@@ -735,6 +738,27 @@ export default function CheckoutScreen() {
 
       setPendingAddress(activeAddress);
 
+      // M-15: the server's amount is authoritative. If it differs from what the
+      // customer was shown (prices, tax or shipping changed), show the real amount first.
+      const serverPaise = Number(rzpOrder.amount);
+      const shownPaise = Math.round(finalTotal * 100);
+      if (Number.isFinite(serverPaise) && Math.abs(serverPaise - shownPaise) > 1) {
+        const proceed = await new Promise<boolean>((resolve) =>
+          Alert.alert(
+            "Updated total",
+            `The final amount for this order is ₹${(serverPaise / 100).toFixed(2)} (shown: ₹${finalTotal.toFixed(2)}). Prices, tax or shipping were updated. Continue to payment?`,
+            [
+              { text: "Cancel", style: "cancel", onPress: () => resolve(false) },
+              { text: "Continue", onPress: () => resolve(true) },
+            ],
+          ),
+        );
+        if (!proceed) {
+          setLoading(false);
+          return;
+        }
+      }
+
       setRazorpayParams({
         orderId: rzpOrder.id,
         amount: rzpOrder.amount,
@@ -745,6 +769,8 @@ export default function CheckoutScreen() {
         phone: activeAddress?.phone ?? phone,
         description: `${items.length} item${items.length > 1 ? "s" : ""} from MakersFlow`,
       });
+      // M-13: remember the payment attempt, so its outcome can be reconciled if the app is closed.
+      await AsyncStorage.setItem(PENDING_PAYMENT_KEY, JSON.stringify({ razorpayOrderId: rzpOrder.id, startedAt: Date.now() })).catch(() => {});
       setShowPayment(true);
     } catch (err: any) {
       Alert.alert("Error", err.message ?? "Could not start payment. Please try again.");
@@ -778,6 +804,9 @@ export default function CheckoutScreen() {
         return;
       }
 
+      // M-13: verified; the pending marker is no longer needed.
+      await AsyncStorage.removeItem(PENDING_PAYMENT_KEY).catch(() => {});
+
       // Backend (6) fulfills order, order_items, inventory, and invoice atomically in POST /payments/verify
       const createdOrder = verification.order ?? null;
       const ordId = createdOrder?.id ? String(createdOrder.id) : orderId;
@@ -800,7 +829,8 @@ export default function CheckoutScreen() {
             line2: pendingAddress?.address_line2 || undefined,
             city: pendingAddress?.city || "",
             state: pendingAddress?.state || "Andhra Pradesh",
-            pincode: pendingAddress?.pincode || "",
+            // L-24: addresses store postal_code; keep pincode as a legacy fallback.
+            pincode: pendingAddress?.postal_code || pendingAddress?.pincode || "",
             phone: phone || undefined,
             gstin: undefined,
           };
@@ -892,7 +922,9 @@ export default function CheckoutScreen() {
     setRazorpayParams(null);
     Alert.alert(
       "Payment Failed",
-      reason || "Your payment could not be completed. No amount has been deducted.",
+      // M-13: do not claim nothing was deducted; the gateway decides that.
+      (reason || "Your payment could not be completed.") +
+        "\n\nIf any amount was debited, the order will be confirmed automatically or the amount returned by the payment provider. Check My Orders.",
       [
         { text: "Try Again" },
         { text: "Cancel", style: "cancel" },
@@ -1289,6 +1321,11 @@ export default function CheckoutScreen() {
           setShowPayment(false);
           setRazorpayParams(null);
           setLoading(false);
+          // M-13: the pending marker is kept; a completed payment is confirmed by the server webhook.
+          Alert.alert(
+            "Payment not completed",
+            "If you finished paying before closing, your order will be confirmed automatically and appear in My Orders.",
+          );
         }}
       />
 
