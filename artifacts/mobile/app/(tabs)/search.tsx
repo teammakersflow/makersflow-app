@@ -189,7 +189,7 @@ export default function SearchScreen() {
     if (selectedFilters.price === 'Free' && !c.isFree && c.price > 0) {
       return false;
     }
-    if (selectedFilters.price === 'Paid' && (c.isFree || c.price === 0)) {
+    if (selectedFilters.price === 'Premium' && (c.isFree || c.price === 0)) {
       return false;
     }
     if (selectedFilters.rating && (c.rating ?? 0) < selectedFilters.rating) {
@@ -223,7 +223,7 @@ export default function SearchScreen() {
     if (selectedFilters.price === 'Free' && p.price > 0) {
       return false;
     }
-    if (selectedFilters.price === 'Paid' && p.price === 0) {
+    if (selectedFilters.price === 'Premium' && p.price === 0) {
       return false;
     }
     if (selectedFilters.rating && (p.rating ?? 0) < selectedFilters.rating) {
@@ -513,7 +513,7 @@ export default function SearchScreen() {
               <View style={styles.filterGroup}>
                 <Text style={[styles.filterGroupTitle, { color: colors.foreground }]}>Price</Text>
                 <View style={styles.chipRow}>
-                  {['Free', 'Paid'].map((pr) => {
+                  {['Free', 'Premium'].map((pr) => {
                     const isSelected = tempFilters.price === pr;
                     return (
                       <Pressable

@@ -5,7 +5,7 @@ import * as Sharing from 'expo-sharing';
 import * as FileSystem from 'expo-file-system/legacy';
 import { Asset } from 'expo-asset';
 import { TEXT_STYLES } from '@/constants/typography';
-import { issueCertificate, fetchMyCertificates } from '@/services/certificateService';
+import { issueCertificate, fetchMyCertificatesStrict } from '@/services/certificateService';
 import React, { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -26,6 +26,20 @@ const RNWebView = WebView as unknown as React.ComponentType<
 
 const TRANSPARENT_1X1_PNG =
   'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (char) => {
+    const entities: Record<string, string> = {
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'" : '&#39;',
+    };
+    return entities[char] ?? char;
+  });
+}
+
 
 function getCertificateHtml(
   studentName: string,
@@ -307,22 +321,22 @@ function getCertificateHtml(
           </div>
 
           <p class="presented">Presented to</p>
-          <h2 class="name">${studentName}</h2>
+          <h2 class="name">${escapeHtml(studentName)}</h2>
 
-          <p class="completion-text">for successfully completing <b>${daysText}</b> in the</p>
-          ${level ? `<div class="level-pill">${level.toUpperCase()} LEVEL</div>` : ''}
-          <h2 class="course-title">${courseName}</h2>
+          <p class="completion-text">for successfully completing <b>${escapeHtml(daysText)}</b> in the</p>
+          ${level ? `<div class="level-pill">${escapeHtml(level.toUpperCase())} LEVEL</div>` : ''}
+          <h2 class="course-title">${escapeHtml(courseName)}</h2>
           <h4 class="tagline">"Learn by Doing – Future Tech Explorers"</h4>
-          ${instructor ? `<p class="instructor-credit">Instructor: ${instructor}</p>` : ''}
+          ${instructor ? `<p class="instructor-credit">Instructor: ${escapeHtml(instructor)}</p>` : ''}
 
           <p class="desc">
             demonstrating dedication, practical skill development, and hands-on mastery of core concepts through the FLOW learning initiative.
           </p>
 
           <div class="meta-row">
-            <p class="date">Issued on ${displayDate}</p>
+            <p class="date">Issued on ${escapeHtml(displayDate)}</p>
             <p class="verify-text">Verify at makersflow.com/verify</p>
-            <p class="cert-id">${certId}</p>
+            <p class="cert-id">${escapeHtml(certId)}</p>
           </div>
 
           <div class="bottom-section">
@@ -390,7 +404,7 @@ export default function CertificateScreen() {
       let effectiveIssuedAt: string | null = null;
       if (!effectiveCertId && courseId) {
         try {
-          const myCerts = await fetchMyCertificates();
+          const myCerts = await fetchMyCertificatesStrict();
           const match = myCerts.find((c) => String(c.course_id) === String(courseId));
           if (match?.certificate_number) {
             effectiveCertId = match.certificate_number;
@@ -418,8 +432,8 @@ export default function CertificateScreen() {
       let displayDate = 'N/A';
       try {
         const dateToFormat = effectiveIssuedAt || completionDate;
-        const d = dateToFormat ? new Date(dateToFormat) : new Date();
-        if (!isNaN(d.getTime())) {
+        const d = dateToFormat ? new Date(dateToFormat) : null;
+        if (d && !isNaN(d.getTime())) {
           displayDate = d.toLocaleDateString('en-IN', {
             day: 'numeric',
             month: 'long',
@@ -513,15 +527,7 @@ export default function CertificateScreen() {
       }
 
       const dir = `${FileSystem.documentDirectory}certificates/`;
-      try {
-        const dirInfo = await FileSystem.getInfoAsync(dir);
-        if (dirInfo.exists) {
-          await FileSystem.deleteAsync(dir, { idempotent: true });
-        }
-        await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
-      } catch (cleanErr) {
-        console.warn('[Certificate] Directory cleanup warning:', cleanErr);
-      }
+      await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
 
       // Generate standard PDF from HTML template
       const dest = `${dir}certificate_${Date.now()}.pdf`;

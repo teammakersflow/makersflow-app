@@ -224,7 +224,8 @@ export default function ProgressScreen() {
       const moduleCache = new Map<string, any[]>();
       const getCachedModules = async (courseId: string) => {
         if (!moduleCache.has(courseId)) {
-          moduleCache.set(courseId, await getCourseModules(courseId));
+          // M-23: getCourseModules now throws when offline with no cached copy; keep this screen's old behaviour.
+          moduleCache.set(courseId, await getCourseModules(courseId).catch(() => []));
         }
         return moduleCache.get(courseId);
       };

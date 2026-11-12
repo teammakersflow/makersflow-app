@@ -1,10 +1,12 @@
+import { isPhysicalStoreProduct } from "@/constants/commerce";
 import { Ionicons } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
 import * as Haptics from "expo-haptics";
 import { useFavorites } from "@/context/FavoritesContext";
-import { router, useLocalSearchParams, Stack } from "expo-router";
+import { router, useLocalSearchParams, Stack, useFocusEffect } from "expo-router";
 import { useRequireAuth } from "@/context/AuthRequireContext";
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
+import { createTapGuard, planAddToCart, planBuyNow } from "@/lib/buyNow";
 import {
   Alert,
   Image,
@@ -160,7 +162,19 @@ export default function ProductDetailScreen() {
   // useLocalSearchParams can return string | string[] | undefined — normalise to a clean string
   const rawId = Array.isArray(params.id) ? params.id[0] : params.id;
   const id = rawId && rawId !== 'undefined' && !isNaN(Number(rawId)) ? rawId : undefined;
-  const { addToCart, items, decrementQuantity } = useCart();
+  const { addToCart, addItemsToCart, items, decrementQuantity } = useCart();
+  // Buy Now: one add per visit; rapid repeated taps are ignored until the screen is focused again.
+  const buyNowGuardRef = useRef(createTapGuard());
+  // Add to Cart: held from the add until the confirmation alert is answered
+  // (or the screen regains focus), so taps that arrive before the re-render
+  // disables the button cannot add the quantity twice.
+  const addToCartGuardRef = useRef(createTapGuard());
+  useFocusEffect(
+    useCallback(() => {
+      buyNowGuardRef.current.release();
+      addToCartGuardRef.current.release();
+    }, []),
+  );
   const { isProductInWishlist, toggleWishlistProduct } = useFavorites();
   const { requireAuth } = useRequireAuth();
 
@@ -380,6 +394,18 @@ export default function ProductDetailScreen() {
     );
   }
 
+  // C-5: digital goods opened by deep link or stale cache are not purchasable in-app.
+  if (!isPhysicalStoreProduct(product as any)) {
+    return (
+      <View style={[styles.container, { backgroundColor: colors.background, alignItems: "center", justifyContent: "center", padding: 24 }]}>
+        <Text style={{ color: colors.foreground, fontFamily: "Inter_600SemiBold", fontSize: 16, textAlign: "center" }}>This item is not available in the app.</Text>
+        <Pressable onPress={() => router.back()} style={{ marginTop: 16 }} accessibilityRole="button">
+          <Text style={{ color: "#0B6FAD", fontFamily: "Inter_600SemiBold" }}>Go back</Text>
+        </Pressable>
+      </View>
+    );
+  }
+
   const isInCart = items.some((i) => i.product.id === product.id);
   const discount = Math.round(((product.originalPrice - product.price) / product.originalPrice) * 100);
   const topPad = Platform.OS === "web" ? 67 : insets.top;
@@ -387,13 +413,27 @@ export default function ProductDetailScreen() {
   function handleAddToCart() {
     if (!product) return;
     requireAuth(() => {
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      for (let i = 0; i < localQty; i++) {
-        addToCart(product);
+      // Add to Cart (2026-11-12): exact selected quantity in ONE cart update.
+      // The old loop of addToCart() calls was cut to 1 unit by addToCart's
+      // 500 ms debounce. Rules: lib/buyNow.ts (planAddToCart).
+      const plan = planAddToCart({ inStock: product.inStock, selectedQuantity: localQty });
+      if (plan.kind === "blocked") return;
+      if (!addToCartGuardRef.current.tryAcquire()) return; // rapid repeated tap
+      if (!addItemsToCart([{ product, quantity: plan.quantity }])) {
+        addToCartGuardRef.current.release();
+        Alert.alert("Unavailable", "This item can't be added to your cart right now.");
+        return;
       }
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       Alert.alert("Added to Cart", `${product.title} has been added to your cart.`, [
-        { text: "Continue Shopping", style: "cancel" },
-        { text: "Checkout", onPress: () => router.push("/store/checkout") },
+        { text: "Continue Shopping", style: "cancel", onPress: () => addToCartGuardRef.current.release() },
+        {
+          text: "Checkout",
+          onPress: () => {
+            addToCartGuardRef.current.release();
+            router.push("/store/checkout");
+          },
+        },
       ]);
     });
   }
@@ -714,10 +754,16 @@ export default function ProductDetailScreen() {
             onPress={() => {
               requireAuth(() => {
                 if (!product?.id) return;
-                // Add with current local quantity before going to checkout
-                const qty = localQty || 1;
-                if (!isInCart) {
-                  for (let i = 0; i < qty; i++) addToCart(product);
+                // Buy Now (2026-11-12): add the exact selected quantity in ONE cart
+                // update. The old loop of addToCart() calls was cut to 1 unit by
+                // addToCart's 500 ms debounce. Rules: lib/buyNow.ts.
+                const plan = planBuyNow({ inStock: product.inStock, isInCart, selectedQuantity: localQty });
+                if (plan.kind === "blocked") return;
+                if (!buyNowGuardRef.current.tryAcquire()) return; // rapid repeated tap
+                if (plan.kind === "add_then_checkout" && !addItemsToCart([{ product, quantity: plan.quantity }])) {
+                  buyNowGuardRef.current.release();
+                  Alert.alert("Unavailable", "This item can't be added to your cart right now.");
+                  return;
                 }
                 router.push("/store/checkout");
               });

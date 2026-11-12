@@ -4,6 +4,10 @@ import Constants from "expo-constants";
 import { Platform } from "react-native";
 import { apiClient } from "@/lib/auth/apiClient";
 import { tokenStorage } from "@/lib/auth/tokenStorage";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+
+/** H-12: the Expo push token registered for the signed-in user on this device. */
+const LAST_PUSH_TOKEN_KEY = "push:lastRegisteredToken";
 
 const devLog = (...args: any[]) => {
   if (__DEV__) console.log(...args);
@@ -33,7 +37,12 @@ let handlerConfigured = false;
  * in the NestJS push-tokens table so the backend can send pushes to this device.
  * Safe to call on every app start — it upserts. No-ops in Expo Go/simulators.
  */
-export async function registerForPushNotifications(_userId?: string): Promise<string | null> {
+export async function registerForPushNotifications(
+  _userId?: string,
+  opts: { prompt?: boolean } = {},
+): Promise<string | null> {
+  // L-25: only prompt when explicitly allowed (sign-in / restore), never on every app resume.
+  const mayPrompt = opts.prompt !== false;
   try {
     if (!Device.isDevice) {
       devLog("[Push] Skipping registration (simulator)");
@@ -82,9 +91,9 @@ export async function registerForPushNotifications(_userId?: string): Promise<st
       });
     }
 
-    const { status: existing } = (await Notifications.getPermissionsAsync()) as any;
+    const { status: existing, canAskAgain } = (await Notifications.getPermissionsAsync()) as any;
     let finalStatus = existing;
-    if (existing !== "granted") {
+    if (existing !== "granted" && mayPrompt && canAskAgain !== false) {
       const { status } = (await Notifications.requestPermissionsAsync()) as any;
       finalStatus = status;
     }
@@ -120,6 +129,7 @@ export async function registerForPushNotifications(_userId?: string): Promise<st
         device_info: deviceInfo || undefined,
       });
       devLog("[Push] Registered push token with backend");
+      await AsyncStorage.setItem(LAST_PUSH_TOKEN_KEY, token).catch(() => {});
     } catch (backendErr: any) {
       devLog("[Push] Backend push token registration failed:", backendErr?.message || backendErr);
     }
@@ -131,21 +141,28 @@ export async function registerForPushNotifications(_userId?: string): Promise<st
   }
 }
 
-/** Remove this device's push token (call on logout). Best-effort. */
+/**
+ * Remove this device's push token. Call on logout, BEFORE the session is revoked. Best-effort.
+ * H-12 (2026-11-10): uses the token cached at registration, so it still works
+ * if notification permission was revoked later.
+ */
 export async function unregisterPushToken(_userId?: string): Promise<void> {
   try {
     if (!Device.isDevice) return;
-    const Notifications = getNotifications();
-    if (!Notifications) return;
-    const { status } = (await Notifications.getPermissionsAsync()) as any;
-    if (status !== "granted") return;
-    const projectId =
-      (Constants as any)?.expoConfig?.extra?.eas?.projectId ??
-      (Constants as any)?.easConfig?.projectId;
-    const tokenResponse = await Notifications.getExpoPushTokenAsync(
-      projectId ? { projectId } : undefined
-    );
-    const token = tokenResponse.data;
+    let token: string | null = await AsyncStorage.getItem(LAST_PUSH_TOKEN_KEY).catch(() => null);
+    if (!token) {
+      const Notifications = getNotifications();
+      if (!Notifications) return;
+      const { status } = (await Notifications.getPermissionsAsync()) as any;
+      if (status !== "granted") return;
+      const projectId =
+        (Constants as any)?.expoConfig?.extra?.eas?.projectId ??
+        (Constants as any)?.easConfig?.projectId;
+      const tokenResponse = await Notifications.getExpoPushTokenAsync(
+        projectId ? { projectId } : undefined
+      );
+      token = tokenResponse.data;
+    }
     if (!token) return;
 
     const accessToken = await tokenStorage.getAccessToken();
@@ -159,6 +176,7 @@ export async function unregisterPushToken(_userId?: string): Promise<void> {
         await apiClient.delete(`/push-tokens/${matched.id}`);
         devLog("[Push] Unregistered push token with backend");
       }
+      await AsyncStorage.removeItem(LAST_PUSH_TOKEN_KEY).catch(() => {});
     } catch (err: any) {
       devLog("[Push] Failed to unregister push token:", err?.message || err);
     }

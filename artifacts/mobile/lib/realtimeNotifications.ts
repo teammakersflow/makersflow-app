@@ -150,10 +150,27 @@ export function useRealtimeNotifications(
 
   useEffect(() => {
     if (!userId) return;
-    const unsubscribe = subscribeToNotifications(userId, {
-      onNotification: (n) => handlersRef.current.onNotification?.(n),
-      onChange: () => handlersRef.current.onChange?.(),
-    });
-    return unsubscribe;
+    // M-28 (2026-11-10): Realtime respects RLS (auth.uid() = user_id). This app
+    // signs in through its own API, so the Supabase client has no user session,
+    // and an anonymous subscription can never receive personal rows. It only
+    // held a useless websocket open. Subscribe only when a real Supabase session
+    // exists (after a token bridge is added; see the tracker, M-28). Until then
+    // the screen refreshes through push notifications and reconnect/foreground events.
+    let unsubscribe: () => void = () => {};
+    let cancelled = false;
+    supabase.auth
+      .getSession()
+      .then(({ data }) => {
+        if (cancelled || !data?.session?.access_token) return;
+        unsubscribe = subscribeToNotifications(userId, {
+          onNotification: (n) => handlersRef.current.onNotification?.(n),
+          onChange: () => handlersRef.current.onChange?.(),
+        });
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
   }, [userId]);
 }

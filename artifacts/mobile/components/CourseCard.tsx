@@ -1,3 +1,4 @@
+import { coursePriceLabel } from "@/lib/courseAccess";
 import { Feather, MaterialIcons } from "@expo/vector-icons";
 import { router } from "expo-router";
 import React, { useState } from "react";
@@ -138,7 +139,7 @@ export const CourseCard = React.memo(function CourseCard({ course, horizontal = 
             </View>
           ) : (
             <Text style={[styles.priceTextLarge, { color: colors.foreground }]}>
-              {course.isFree ? "Free" : `₹${course.price}`}
+              {coursePriceLabel(course)}
             </Text>
           )}
         </View>
@@ -246,7 +247,7 @@ export const CourseCard = React.memo(function CourseCard({ course, horizontal = 
         ) : (
           <View style={styles.actionRow}>
             <Text style={[styles.priceTextLarge, { color: colors.foreground }]}>
-              {course.isFree ? "Free" : `₹${course.price}`}
+              {coursePriceLabel(course)}
             </Text>
             <Pressable
               style={[styles.addBtn, { backgroundColor: colors.secondary }]}

@@ -1,3 +1,4 @@
+import { postLoginRoute } from "@/lib/authGate";
 import { Feather, Ionicons } from "@expo/vector-icons";
 import GoogleLogo from "@/components/GoogleLogo";
 import * as Haptics from "expo-haptics";
@@ -75,11 +76,8 @@ export default function LoginScreen() {
     if (result.success) {
       const profile = (result as any).profile;
       setGoogleLoading(false);
-      if (profile && profile.grade) {
-        router.replace("/(tabs)");
-      } else {
-        router.replace("/(auth)/onboarding");
-      }
+      // H-4: one rule for where a signed-in user goes (see lib/authGate.ts).
+      router.replace(postLoginRoute(profile));
     } else {
       setGoogleLoading(false);
       setError(result.error || "Google sign-in failed. Please try again.");

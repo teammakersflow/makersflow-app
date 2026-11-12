@@ -1,3 +1,6 @@
+import { useNetwork } from "@/context/NetworkContext";
+import { flushPendingProgress } from "@/lib/progressStorage";
+import { routeForNotification } from "@/lib/notificationRouting";
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import {
   AppState,
@@ -47,43 +50,64 @@ export function AppGate({ children }: { children: React.ReactNode }) {
     // Re-verify / refresh token when app resumes from background
     const sub = AppState.addEventListener("change", (nextState) => {
       if (nextState === "active" && user?.id) {
-        registerForPushNotifications(user.id).catch(() => {});
+        // L-25: refresh the token silently on resume; no permission prompt.
+        registerForPushNotifications(user.id, { prompt: false }).catch(() => {});
       }
     });
     return () => sub.remove();
   }, [user?.id]);
 
+  // M-17 (2026-11-10): re-send lesson progress queued while offline or after a
+  // failed save, on sign-in, on return to the foreground and on reconnect.
+  const { addReconnectListener } = useNetwork();
+  useEffect(() => {
+    const uid = user?.id;
+    if (!uid) return;
+    const flush = () => { flushPendingProgress(uid).catch(() => {}); };
+    flush();
+    const appSub = AppState.addEventListener("change", (s) => { if (s === "active") flush(); });
+    const offReconnect = addReconnectListener(flush);
+    return () => { appSub.remove(); offReconnect(); };
+  }, [user?.id, addReconnectListener]);
+
   // ── 2. Notification tap handling ─────────────────────────────────────────
+  // M-29 (2026-11-10):
+  //  - The listener is registered immediately. The old 3 s delay dropped taps,
+  //    and its cleanup was returned from inside setTimeout, so it never ran.
+  //  - Cold start: the tap that launched the app is read once with
+  //    getLastNotificationResponseAsync and routed after a short delay that
+  //    lets the root navigator mount.
+  //  - Payloads are validated by routeForNotification (untrusted input).
+  const handledResponseIds = useRef(new Set<string>());
   useEffect(() => {
     if (isExpoGo()) return;
-    // Delay so expo-notifications native module is ready
-    const t = setTimeout(() => {
+    let Notifications: any;
+    try {
+      Notifications = require("expo-notifications");
+    } catch {
+      return; // expo-notifications not available
+    }
+    const go = (response: any) => {
       try {
-        const Notifications = require("expo-notifications");
-        const sub = Notifications.addNotificationResponseReceivedListener(
-          (response: any) => {
-            try {
-              const data = response?.notification?.request?.content?.data ?? {};
-              if (data.screen === "orders") {
-                router.push("/store/orders");
-              } else if (data.screen === "course" && data.courseId) {
-                router.push(`/course/${data.courseId}`);
-              } else if (data.screen === "news" && data.newsId) {
-                router.push(`/news/${data.newsId}`);
-              } else {
-                router.push("/notifications");
-              }
-            } catch {
-              // ignore malformed payloads
-            }
-          }
-        );
-        return () => sub.remove();
+        const reqId = String(response?.notification?.request?.identifier ?? "");
+        if (reqId && handledResponseIds.current.has(reqId)) return;
+        if (reqId) handledResponseIds.current.add(reqId);
+        router.push(routeForNotification(response?.notification?.request?.content?.data) as any);
       } catch {
-        // expo-notifications not available
+        // ignore malformed payloads
       }
-    }, 3000);
-    return () => clearTimeout(t);
+    };
+    const sub = Notifications.addNotificationResponseReceivedListener(go);
+    let coldStartTimer: ReturnType<typeof setTimeout> | null = null;
+    Notifications.getLastNotificationResponseAsync?.()
+      .then((last: any) => {
+        if (last) coldStartTimer = setTimeout(() => go(last), 600);
+      })
+      .catch(() => {});
+    return () => {
+      sub?.remove?.();
+      if (coldStartTimer) clearTimeout(coldStartTimer);
+    };
   }, []);
 
   // ── 3. Biometric lock helpers ────────────────────────────────────────────

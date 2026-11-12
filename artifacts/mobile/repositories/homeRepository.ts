@@ -265,6 +265,8 @@ export const homeRepository = {
     forceRefresh = false,
     onBackgroundUpdate?: (data: HomeData) => void
   ): Promise<RepositoryResult<HomeData>> {
+    // M-25: captured before any fetch; late writes for another account are dropped.
+    const scope = cacheManager.userScope();
     if (isOffline) {
       return homeRepository.loadFromCache(userId);
     }
@@ -314,11 +316,11 @@ export const homeRepository = {
               const nextNotifCount = newNotifCount !== null ? newNotifCount : (unreadNotifMeta?.data ?? 0);
 
               if (progressStale && newProgress !== null) {
-                cacheManager.write(STORAGE_KEYS.CACHED_HOME_PROGRESS, newProgress);
+                cacheManager.write(STORAGE_KEYS.CACHED_HOME_PROGRESS, newProgress, scope);
                 updated = true;
               }
               if (notificationsStale && newNotifCount !== null) {
-                cacheManager.write(STORAGE_KEYS.CACHED_HOME_NOTIFICATIONS, newNotifCount);
+                cacheManager.write(STORAGE_KEYS.CACHED_HOME_NOTIFICATIONS, newNotifCount, scope);
                 updated = true;
               }
 
@@ -362,8 +364,8 @@ export const homeRepository = {
           fetchProgress(userId).catch(() => EMPTY_PROGRESS),
           fetchNotificationCount(userId).catch(() => 0),
         ]);
-        cacheManager.write(STORAGE_KEYS.CACHED_HOME_PROGRESS,      progress);
-        cacheManager.write(STORAGE_KEYS.CACHED_HOME_NOTIFICATIONS, unreadNotifCount);
+        cacheManager.write(STORAGE_KEYS.CACHED_HOME_PROGRESS, progress, scope);
+        cacheManager.write(STORAGE_KEYS.CACHED_HOME_NOTIFICATIONS, unreadNotifCount, scope);
       }
 
       return networkResult({

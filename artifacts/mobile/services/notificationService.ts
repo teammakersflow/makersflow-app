@@ -86,11 +86,12 @@ export const notificationService = {
   },
 
   /**
-   * Deletes/dismisses a student's own notification via DELETE /notifications/:id.
+   * Deletes a student's own notification via DELETE /notifications/my/:id.
+   * (DELETE /notifications/:id is admin-only and always returned 403.)
    */
   async deleteNotification(notificationId: string): Promise<any> {
     try {
-      const res = await apiClient.delete<any>(`/notifications/${notificationId}`);
+      const res = await apiClient.delete<any>(`/notifications/my/${encodeURIComponent(notificationId)}`);
       return res?.data || res;
     } catch (error) {
       console.error(`[NotificationService] deleteNotification error for ${notificationId}:`, error);

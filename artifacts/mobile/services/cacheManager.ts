@@ -14,6 +14,7 @@
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { CACHE_VERSION } from '@/constants/cachePolicy';
+import { USER_CACHE_KEYS } from '@/constants/storageKeys';
 
 // ── Public result type ───────────────────────────────────────────────────────
 
@@ -70,7 +71,38 @@ interface CachePayload<T> {
  * NOTE: Returns the full CachePayload so callers can build CacheReadResult
  * with the real updatedAt timestamp.
  */
-async function readRaw<T>(key: string): Promise<CachePayload<T> | null> {
+// ── M-25: per-user scoping (2026-11-10) ─────────────────────────────────────
+// User-specific entries (USER_CACHE_KEYS) are stored under "<key>::<userId>".
+// With no signed-in owner they are neither read nor written. Each account
+// change bumps an epoch. A write that carries a scope token captured BEFORE the
+// change (a slow background fetch that started for the previous user) is
+// dropped, so it can never land in the next user's cache.
+let cacheOwner: string | null = null;
+let ownerEpoch = 0;
+export interface UserScope { owner: string | null; epoch: number }
+
+function setCacheOwner(userId: string | null): void {
+  const next = userId || null;
+  if (next !== cacheOwner) {
+    cacheOwner = next;
+    ownerEpoch += 1;
+  }
+}
+function userScope(): UserScope {
+  return { owner: cacheOwner, epoch: ownerEpoch };
+}
+function isUserKey(key: string): boolean {
+  return USER_CACHE_KEYS.includes(key);
+}
+/** Physical storage key, or null when a user-scoped key has no owner. */
+function physicalKey(key: string): string | null {
+  if (!isUserKey(key)) return key;
+  return cacheOwner ? `${key}::${cacheOwner}` : null;
+}
+
+async function readRaw<T>(logicalKey: string): Promise<CachePayload<T> | null> {
+  const key = physicalKey(logicalKey);
+  if (!key) return null;
   try {
     const raw = await AsyncStorage.getItem(key);
     if (!raw) return null;
@@ -131,7 +163,14 @@ async function readWithMeta<T>(
  * Returns true on success, false on failure.
  * Never throws — storage failures are non-fatal.
  */
-async function write<T>(key: string, data: T): Promise<boolean> {
+async function write<T>(logicalKey: string, data: T, scope?: UserScope): Promise<boolean> {
+  if (isUserKey(logicalKey)) {
+    // Drop writes that started under a different (or no) account.
+    if (!cacheOwner) return false;
+    if (scope && (scope.epoch !== ownerEpoch || scope.owner !== cacheOwner)) return false;
+  }
+  const key = physicalKey(logicalKey);
+  if (!key) return false;
   try {
     const payload: CachePayload<T> = {
       version: CACHE_VERSION,
@@ -154,7 +193,19 @@ async function write<T>(key: string, data: T): Promise<boolean> {
  */
 async function clear(keys: string | string[]): Promise<boolean> {
   try {
-    const keyList = Array.isArray(keys) ? keys : [keys];
+    const logical = Array.isArray(keys) ? keys : [keys];
+    const keyList: string[] = [];
+    for (const k of logical) {
+      if (isUserKey(k)) {
+        // Clear the current owner's copy, the legacy unscoped key from older
+        // app versions, and any other account's copy left on this device.
+        keyList.push(k);
+        const all = await AsyncStorage.getAllKeys().catch(() => [] as readonly string[]);
+        for (const a of all) if (a.startsWith(`${k}::`)) keyList.push(a);
+      } else {
+        keyList.push(k);
+      }
+    }
     await AsyncStorage.multiRemove(keyList);
     return true;
   } catch (e) {
@@ -181,6 +232,8 @@ export const cacheManager = {
   readWithMeta,
   write,
   clear,
+  setCacheOwner,
+  userScope,
   isExpired,
   validateVersion,
 };

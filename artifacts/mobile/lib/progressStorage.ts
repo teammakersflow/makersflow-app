@@ -1,4 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { createProgressOutbox } from '@/lib/progressOutbox';
 import { apiClient } from '@/lib/auth/apiClient';
 import { getCourseModules } from '@/services/courseDataProvider';
 import { emitSessionExpired, isAuthError } from './sessionEvents';
@@ -329,7 +330,7 @@ async function performUpsertLessonProgress(
   lessonId: string | number,
   currentTimeSecs: number,
   watchPercentage: number,
-): Promise<void> {
+): Promise<boolean> {
   try {
     const numCourseId = Number(courseId);
     const numLessonId = Number(lessonId);
@@ -343,7 +344,7 @@ async function performUpsertLessonProgress(
       const lookupSucceeded = await lookupCourseProgressIds(userId, numCourseId);
 
       // Never POST when the lookup failed; the record may already exist.
-      if (!lookupSucceeded) return;
+      if (!lookupSucceeded) return false;
 
       existingProgressId = lessonProgressIdCache.get(cacheKey);
 
@@ -351,7 +352,7 @@ async function performUpsertLessonProgress(
       // Retry lookup after the cooldown instead of creating another record.
       if (!existingProgressId && pendingLessonProgressResolution.has(cacheKey)) {
         courseProgressLookupRetryAfter.set(courseKey, Date.now() + 30000);
-        return;
+        return false;
       }
     }
 
@@ -372,7 +373,7 @@ async function performUpsertLessonProgress(
 
     if (existingProgressId) {
       await apiClient.patch(`/lesson-progress/${existingProgressId}`, payload);
-      return;
+      return true;
     }
 
     try {
@@ -383,6 +384,7 @@ async function performUpsertLessonProgress(
       });
 
       const createdId = findCreatedProgressId(created);
+      const posted = true;
 
       if (createdId) {
         lessonProgressIdCache.set(cacheKey, createdId);
@@ -399,6 +401,7 @@ async function performUpsertLessonProgress(
           courseProgressLookupRetryAfter.set(courseKey, Date.now() + 30000);
         }
       }
+      return posted;
     } catch (postErr: any) {
       if (postErr?.status === 409 || postErr?.statusCode === 409) {
         pendingLessonProgressResolution.add(cacheKey);
@@ -409,9 +412,11 @@ async function performUpsertLessonProgress(
         if (resolvedId) {
           pendingLessonProgressResolution.delete(cacheKey);
           await apiClient.patch(`/lesson-progress/${resolvedId}`, payload);
+          return true;
         } else if (lookupSucceeded) {
           courseProgressLookupRetryAfter.set(courseKey, Date.now() + 30000);
         }
+        return false;
       } else {
         throw postErr;
       }
@@ -419,6 +424,7 @@ async function performUpsertLessonProgress(
   } catch (error: any) {
     console.error('[progress] upsert error', error);
     if (isAuthError(error)) emitSessionExpired();
+    return false;
   }
 }
 
@@ -446,13 +452,15 @@ export function upsertLessonProgress(
     let nextUpdate: typeof update | undefined = update;
 
     while (nextUpdate) {
-      await performUpsertLessonProgress(
+      const ok = await performUpsertLessonProgress(
         nextUpdate.userId,
         nextUpdate.courseId,
         nextUpdate.lessonId,
         nextUpdate.currentTimeSecs,
         nextUpdate.watchPercentage,
       );
+      // M-17: never lose progress; retry from the persistent outbox later.
+      if (!ok) await progressOutbox.put(nextUpdate).catch(() => {});
 
       nextUpdate = pendingLessonProgressUpdates.get(cacheKey);
       pendingLessonProgressUpdates.delete(cacheKey);
@@ -663,4 +671,20 @@ export async function fetchRemoteProgress(userId: string): Promise<UserCoursePro
     console.error('[progressStorage] fetchRemoteProgress failed:', err);
     return [];
   }
+}
+
+
+// ── M-17: persistent progress outbox (2026-11-10) ───────────────────────────
+const OUTBOX_KEY = 'progress_outbox_v1';
+export const progressOutbox = createProgressOutbox({
+  get: () => AsyncStorage.getItem(OUTBOX_KEY),
+  set: (v) => AsyncStorage.setItem(OUTBOX_KEY, v),
+});
+
+/** Re-send queued progress for this user (call on reconnect / app foreground / login). */
+export async function flushPendingProgress(userId: string | undefined | null): Promise<number> {
+  if (!userId) return 0;
+  return progressOutbox.flush(userId, (u) =>
+    performUpsertLessonProgress(u.userId, u.courseId, u.lessonId, u.currentTimeSecs, u.watchPercentage),
+  );
 }

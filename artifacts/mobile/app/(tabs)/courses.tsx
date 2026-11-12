@@ -31,28 +31,58 @@ export default function CoursesScreen() {
   // Debounce ref — prevents rapid reconnect events from triggering repeated refreshes
   const reconnectDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hasLoadedOnce = useRef(false);
+  const previousUserId = useRef(user?.id);
+  const requestGenerationRef = useRef(0);
+
+  useEffect(() => {
+    if (previousUserId.current !== user?.id) {
+      previousUserId.current = user?.id;
+      requestGenerationRef.current += 1;
+      hasLoadedOnce.current = false;
+      setRefreshing(false);
+      setEnrolledCourses([]);
+    }
+  }, [user?.id]);
 
   // ── Single repository call — screen does not know data origin ─────────────
   const loadData = useCallback(async (isRefreshing = false) => {
+    const requestId = ++requestGenerationRef.current;
+    const requestUserId = user?.id;
+
     if (!isRefreshing && !hasLoadedOnce.current) setIsLoading(true);
     try {
       const result = await coursesRepository.get(
-        user?.id,
+        requestUserId,
         isOffline,
         isRefreshing,
         (bgData) => {
+          if (
+            requestId !== requestGenerationRef.current ||
+            requestUserId !== previousUserId.current
+          ) return;
+
           setEnrolledCourses(bgData.enrollments);
           setBrowseMoreCourses(bgData.catalog);
         }
       );
+
+      if (
+        requestId !== requestGenerationRef.current ||
+        requestUserId !== previousUserId.current
+      ) return;
+
       setEnrolledCourses(result.data.enrollments);
       setBrowseMoreCourses(result.data.catalog);
       hasLoadedOnce.current = true;
     } catch (err) {
-      console.error('[CoursesScreen] loadData error:', err);
+      if (requestId === requestGenerationRef.current) {
+        console.error('[CoursesScreen] loadData error:', err);
+      }
     } finally {
-      setIsLoading(false);
-      setRefreshing(false);
+      if (requestId === requestGenerationRef.current) {
+        setIsLoading(false);
+        setRefreshing(false);
+      }
     }
   }, [user?.id, isOffline]);
 
@@ -82,7 +112,6 @@ export default function CoursesScreen() {
   const onRefresh = async () => {
     setRefreshing(true);
     await loadData(true);
-    setRefreshing(false);
   };
 
   const inProgressCourses = useMemo(() => {

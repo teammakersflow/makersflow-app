@@ -1,3 +1,4 @@
+import { isPhysicalStoreProduct } from "@/constants/commerce";
 import { Ionicons } from "@expo/vector-icons";
 import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
 import React, { useState, useEffect, useCallback, useRef } from "react";
@@ -104,15 +105,17 @@ export default function StoreScreen() {
 
   const topPad = Platform.OS === "web" ? 67 : insets.top;
 
-  const physicalProducts = products.filter((p) => p.category === "physical");
-  const digitalProducts = products.filter((p) => p.category === "digital");
+  // C-5: only physical products are sellable in-app (cached lists may predate the filter).
+  const sellable = products.filter((p) => isPhysicalStoreProduct(p as any));
+  const physicalProducts = sellable;
+  const digitalProducts: Product[] = [];
 
   const storeCategories = [
     "All",
-    ...Array.from(new Set(products.map((p) => p.subcategory).filter(Boolean))),
+    ...Array.from(new Set(sellable.map((p) => p.subcategory).filter(Boolean))),
   ];
 
-  const filtered = products.filter((p) => {
+  const filtered = sellable.filter((p) => {
     const matchSearch = p.title.toLowerCase().includes(search.toLowerCase());
     const matchCat = activeCategory === "All" || p.subcategory === activeCategory;
     return matchSearch && matchCat;

@@ -8,12 +8,13 @@ export type CreateRazorpayOrderItem = {
 };
 
 export type CreateRazorpayOrderParams = {
-  items: CreateRazorpayOrderItem[];
+  items?: CreateRazorpayOrderItem[];
   amount?: number;
   currency?: string;
   receipt?: string;
   shipping_address?: Record<string, any> | null;
   order_type?: string;
+  course_id?: string;
   coupon_code?: string;
 };
 
@@ -54,6 +55,7 @@ export async function createRazorpayOrder(
       items: params.items,
       shipping_address: params.shipping_address,
       order_type: params.order_type || "product",
+      course_id: params.course_id,
       coupon_code: params.coupon_code,
     });
 

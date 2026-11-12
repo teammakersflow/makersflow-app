@@ -14,7 +14,11 @@ export function getApiBaseUrl(): string {
         'CRITICAL CONFIGURATION ERROR: EXPO_PUBLIC_API_URL must be explicitly configured with a remote server URL for production builds.'
       );
     }
-    return envUrl;
+    // L-20: tokens must never travel over plain HTTP in production.
+    if (!/^https:\/\//i.test(envUrl)) {
+      throw new Error('CRITICAL CONFIGURATION ERROR: EXPO_PUBLIC_API_URL must use https:// in production builds.');
+    }
+    return envUrl.replace(/\/+$/, '');
   }
 
   const rawUrl = envUrl || 'http://localhost:3000';
@@ -56,61 +60,97 @@ export class ApiError extends Error {
   }
 }
 
-let isRefreshing = false;
-let refreshSubscribers: Array<(newToken: string | null) => void> = [];
-
-function subscribeTokenRefresh(cb: (newToken: string | null) => void) {
-  refreshSubscribers.push(cb);
-}
-
-function onRefreshed(newToken: string | null) {
-  refreshSubscribers.map((cb) => cb(newToken));
-  refreshSubscribers = [];
-}
+/** M-6: upper bound for POST /auth/refresh. */
+const REFRESH_TIMEOUT_MS = 15_000;
 
 /**
  * Executes token refresh via POST /auth/refresh
  */
 async function performTokenRefresh(): Promise<string | null> {
   const refreshToken = await tokenStorage.getRefreshToken();
+
   if (!refreshToken) {
     await tokenStorage.clearTokens();
     emitSessionExpired();
     return null;
   }
 
+  // M-6: the refresh call is time-limited. Previously a hung request kept
+  // `isRefreshing` true forever and every later 401 waited on it.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REFRESH_TIMEOUT_MS);
   try {
     const baseUrl = getApiBaseUrl();
     const response = await fetch(`${baseUrl}/auth/refresh`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ refreshToken }),
+      signal: controller.signal,
     });
 
-    if (!response.ok) {
+    if (response.status === 401) {
       await tokenStorage.clearTokens();
       emitSessionExpired();
-      return null;
+      throw new ApiError(401, 'Refresh token is invalid. Please log in again.');
+    }
+
+    if (!response.ok) {
+      throw new ApiError(
+        response.status,
+        `Token refresh failed with status ${response.status}. Saved credentials were preserved.`
+      );
     }
 
     const payload = await response.json();
     const data = payload?.data || payload;
-
     const newAccessToken = data?.accessToken;
-    const nextRefreshToken = data?.refreshToken || refreshToken;
+    const newRefreshToken = data?.refreshToken || refreshToken;
 
-    if (newAccessToken && nextRefreshToken) {
-      await tokenStorage.saveTokens(newAccessToken, nextRefreshToken);
-      return newAccessToken;
+    if (!newAccessToken) {
+      throw new ApiError(502, 'Token refresh returned an invalid response.');
     }
 
-    await tokenStorage.clearTokens();
-    emitSessionExpired();
-    return null;
+    await tokenStorage.saveTokens(newAccessToken, newRefreshToken);
+    return newAccessToken;
+  } catch (error) {
+    if (error instanceof ApiError) {
+      throw error;
+    }
+    if ((error as any)?.name === 'AbortError') {
+      throw new ApiError(408, 'Token refresh timed out. Saved credentials were preserved.');
+    }
+
+    throw new ApiError(
+      0,
+      error instanceof Error
+        ? `Token refresh network error: ${error.message}`
+        : 'Token refresh network error. Saved credentials were preserved.'
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * M-6: single-flight refresh. All concurrent 401s await the same promise,
+ * which always settles (it has a timeout) and is then cleared.
+ */
+let refreshPromise: Promise<string | null> | null = null;
+function refreshOnce(): Promise<string | null> {
+  if (!refreshPromise) {
+    refreshPromise = performTokenRefresh().finally(() => {
+      refreshPromise = null;
+    });
+  }
+  return refreshPromise;
+}
+
+/** L-19: only send the bearer token to our own API origin. */
+export function isApiOrigin(url: string, baseUrl: string): boolean {
+  try {
+    return new URL(url).origin === new URL(baseUrl).origin;
   } catch {
-    await tokenStorage.clearTokens();
-    emitSessionExpired();
-    return null;
+    return false;
   }
 }
 
@@ -125,16 +165,23 @@ export async function apiRequest<T = any>(
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
 
-  const baseUrl = getApiBaseUrl();
+  let baseUrl: string;
+  try {
+    baseUrl = getApiBaseUrl(); // L-20: configuration errors surface as ApiError, not raw throws
+  } catch (e: any) {
+    clearTimeout(timeoutId);
+    throw new ApiError(0, e?.message || 'API is not configured.');
+  }
   const url = endpoint.startsWith('http') ? endpoint : `${baseUrl}${endpoint.startsWith('/') ? '' : '/'}${endpoint}`;
 
   const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
+    ...(options.body !== undefined && !(options.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}),
     ...(options.headers as Record<string, string>),
   };
 
+  // L-19: never attach our bearer token to a third-party URL.
   const accessToken = await tokenStorage.getAccessToken();
-  if (accessToken && !headers['Authorization']) {
+  if (accessToken && !headers['Authorization'] && isApiOrigin(url, baseUrl)) {
     headers['Authorization'] = `Bearer ${accessToken}`;
   }
 
@@ -148,38 +195,16 @@ export async function apiRequest<T = any>(
     clearTimeout(timeoutId);
 
     // Handle 401 Unauthorized (Token Expiry)
-    if (response.status === 401 && !isRetry && !endpoint.includes('/auth/refresh') && !endpoint.includes('/auth/google') && !endpoint.includes('/auth/login')) {
-      if (!isRefreshing) {
-        isRefreshing = true;
-        const newToken = await performTokenRefresh();
-        isRefreshing = false;
-        onRefreshed(newToken);
-
-        if (!newToken) {
-          throw new ApiError(401, 'Session expired. Please log in again.');
-        }
-
-        // Retry original request with new access token
-        return apiRequest<T>(endpoint, options, true);
-      } else {
-        // Queue request while refresh is in progress
-        return new Promise<T>((resolve, reject) => {
-          subscribeTokenRefresh(async (newToken) => {
-            if (!newToken) {
-              reject(new ApiError(401, 'Session expired. Please log in again.'));
-              return;
-            }
-            try {
-              const retryResult = await apiRequest<T>(endpoint, options, true);
-              resolve(retryResult);
-            } catch (err) {
-              reject(err);
-            }
-          });
-        });
+    // 401 → refresh once (single-flight) and retry. Auth endpoints and logout
+    // never trigger a refresh (L-16: no "session expired" alert while logging out).
+    const noRefresh = ['/auth/refresh', '/auth/google', '/auth/login', '/auth/logout'].some((p) => endpoint.includes(p));
+    if (response.status === 401 && !isRetry && !noRefresh && isApiOrigin(url, baseUrl)) {
+      const newToken = await refreshOnce();
+      if (!newToken) {
+        throw new ApiError(401, 'Session expired. Please log in again.');
       }
+      return apiRequest<T>(endpoint, options, true);
     }
-
     if (!response.ok) {
       const errorData = await response.json().catch(() => null);
       throw new ApiError(

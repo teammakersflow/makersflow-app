@@ -53,9 +53,10 @@ export function LearningTabs({ module }: LearningTabsProps) {
   };
 
   const handleResourcePress = async (resource: any) => {
-    if (resource?.url) {
+    // L-18: only open https resource links (no intent:, file:, javascript:, http: etc.).
+    if (resource?.url && /^https:\/\/[^\s]+$/i.test(String(resource.url))) {
       try {
-        await Linking.openURL(resource.url);
+        await Linking.openURL(String(resource.url));
       } catch {
         Alert.alert("Could not open", "This resource link appears to be invalid.");
       }

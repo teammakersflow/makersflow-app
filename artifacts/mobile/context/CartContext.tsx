@@ -1,6 +1,8 @@
+import { isPhysicalStoreProduct } from "@/constants/commerce";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import React, { createContext, useContext, useEffect, useState, useRef } from "react";
 import { Product } from "@/data/mockData";
+import { mergeCartLines } from "@/lib/courseKit";
 
 interface CartItem {
   product: Product;
@@ -10,6 +12,8 @@ interface CartItem {
 interface CartContextType {
   items: CartItem[];
   addToCart: (product: Product) => void;
+  /** Adds several products with quantities in one update (course kits). All or nothing. */
+  addItemsToCart: (entries: { product: Product; quantity: number }[]) => boolean;
   removeFromCart: (productId: string) => void;
   decrementQuantity: (productId: string) => void;
   clearCart: () => void;
@@ -40,7 +44,8 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
         // Only restore cart if the stored version matches the current schema version.
         // If the version is missing or outdated (i.e. stale mock data), discard it.
         if (parsed && parsed.version === CART_VERSION && Array.isArray(parsed.items)) {
-          setItems(parsed.items);
+          // C-5: drop any digital items persisted by an older app version.
+          setItems(parsed.items.filter((i: any) => i && isPhysicalStoreProduct(i.product)));
         } else {
           // Stale / mock data — wipe it so checkout never shows old snapshots.
           AsyncStorage.removeItem(STORAGE_KEY);
@@ -58,6 +63,8 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
   }
 
   function addToCart(product: Product) {
+    // C-5: digital goods cannot be bought in-app (Play Payments policy).
+    if (!isPhysicalStoreProduct(product as any)) return;
     const now = Date.now();
     if (now - lastAddRef.current < 500) {
       return; // prevent duplicate clicks within 500ms
@@ -70,6 +77,28 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
     } else {
       save([...items, { product, quantity: 1 }]);
     }
+  }
+
+  /**
+   * Course kit (2026-11-12): adds every entry with its quantity in a single
+   * functional update, so nothing is lost to the 500 ms add debounce or to a
+   * stale `items` closure. Same duplicate rule as addToCart (an existing line's
+   * quantity is increased). C-5: refuses the whole batch if any entry is not a
+   * physical store product or has an invalid quantity.
+   */
+  function addItemsToCart(entries: { product: Product; quantity: number }[]): boolean {
+    if (entries.length === 0) return false;
+    const valid = entries.every(
+      (e) => isPhysicalStoreProduct(e.product as any) && Number.isInteger(e.quantity) && e.quantity > 0,
+    );
+    if (!valid) return false;
+    setItems((prev) => {
+      const next = mergeCartLines(prev, entries);
+      const payload: PersistedCart = { version: CART_VERSION, items: next };
+      AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+      return next;
+    });
+    return true;
   }
 
   function decrementQuantity(productId: string) {
@@ -94,7 +123,7 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
   const count = items.reduce((sum, i) => sum + i.quantity, 0);
 
   return (
-    <CartContext.Provider value={{ items, addToCart, removeFromCart, decrementQuantity, clearCart, total, count }}>
+    <CartContext.Provider value={{ items, addToCart, addItemsToCart, removeFromCart, decrementQuantity, clearCart, total, count }}>
       {children}
     </CartContext.Provider>
   );

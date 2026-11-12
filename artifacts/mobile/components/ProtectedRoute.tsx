@@ -3,30 +3,40 @@ import React, { useEffect, useRef } from 'react';
 import { ActivityIndicator, View } from 'react-native';
 import { useAuth } from '@/context/AuthContext';
 import { useColors } from '@/hooks/useColors';
+import { decideAuthGate } from '@/lib/authGate';
 
+/**
+ * Fixes H-4 and M-8 (2026-11-10). See lib/authGate.ts for the decision table.
+ *  - Signed-in users may use (auth)/onboarding (profile completion) without
+ *    being blanked or bounced.
+ *  - The redirect guard resets when the user signs out, so the next sign-in
+ *    redirects again.
+ *  - The spinner appears only during the initial session restore. Login and
+ *    logout no longer unmount the navigator.
+ */
 export function ProtectedRoute({ children }: { children: React.ReactNode }) {
-  const { isAuthenticated, isLoading, isAuthenticatedLocally } = useAuth();
+  const { isAuthenticated, isAuthenticatedLocally, authInitialized } = useAuth();
   const segments = useSegments();
   const colors = useColors();
-  const hasRedirected = useRef(false);
+  const redirecting = useRef(false);
 
-  const inAuthGroup = segments[0] === '(auth)';
+  const authed = !!(isAuthenticated || isAuthenticatedLocally);
+  const decision = decideAuthGate({ authInitialized: !!authInitialized, authed, segments });
 
   useEffect(() => {
-    // FIX: redirect as soon as we know auth state — don't wait for full profile load.
-    // isAuthenticatedLocally is set from the restored session token (instant from
-    // SecureStore) before the profile network fetch completes.
-    if ((isAuthenticated || isAuthenticatedLocally) && inAuthGroup && !hasRedirected.current) {
-      hasRedirected.current = true;
-      router.replace('/(tabs)');
+    if (!authed) {
+      redirecting.current = false;
+      return;
     }
-  }, [isAuthenticated, isAuthenticatedLocally, inAuthGroup]);
+    if (decision === 'redirect_to_tabs' && !redirecting.current) {
+      redirecting.current = true;
+      router.replace('/(tabs)');
+    } else if (decision !== 'redirect_to_tabs') {
+      redirecting.current = false;
+    }
+  }, [authed, decision]);
 
-  // FIX: only show the loading spinner on a true cold start (no local session at all).
-  // If the user has a locally cached session (isAuthenticatedLocally = true),
-  // skip the spinner entirely — they'll land on home instantly while the
-  // profile finishes loading in the background.
-  if (isLoading && !isAuthenticatedLocally) {
+  if (decision === 'spinner') {
     return (
       <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: colors.background }}>
         <ActivityIndicator size="large" color={colors.primary} />
@@ -34,10 +44,7 @@ export function ProtectedRoute({ children }: { children: React.ReactNode }) {
     );
   }
 
-  // Hide children while authenticated user is being redirected away from auth group
-  if ((isAuthenticated || isAuthenticatedLocally) && inAuthGroup) {
-    return null;
-  }
-
+  // Keep the navigator mounted. While a redirect is pending we still render the
+  // children (the login screen) for one frame, rather than blanking the whole tree.
   return <>{children}</>;
 }
