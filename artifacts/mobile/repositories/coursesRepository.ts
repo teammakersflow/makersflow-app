@@ -33,6 +33,7 @@ import { firstThumbnailUrl, parseThumbnailUrls } from '@/lib/thumbnailUtils';
 import { fetchAllCourses } from '@/services/courseDataProvider';
 import { fetchEnrolledCourses } from '@/services/enrollmentService';
 import { fetchCourseProgress } from '@/lib/progressStorage';
+import { isCourseComplete } from '@/lib/courseCompletion';
 import { fetchCourseRatingsSummary } from '@/services/reviewService';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -61,6 +62,8 @@ export interface EnrolledCourseDetail {
   completedModules: number;
   lastAccessedAt: string;
   timeSpent: number;
+  /** Backend completion rule (lib/courseCompletion.ts). Optional: older cached entries lack it. */
+  isCompleted?: boolean;
 }
 
 export interface CoursesData {
@@ -139,6 +142,7 @@ async function fetchEnrollments(userId: string): Promise<EnrolledCourseDetail[]>
           completedModules: prog.completed,
           lastAccessedAt:   enr.enrolled_at || new Date().toISOString(),
           timeSpent:        0,
+          isCompleted:      isCourseComplete({ completedAt: enr.completed_at, isCompleted: prog.isCompleted }),
         };
       })
   );

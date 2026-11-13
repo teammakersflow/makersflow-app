@@ -11,6 +11,7 @@ import { CourseCard } from "@/components/CourseCard";
 import { coursesRepository } from "@/repositories/coursesRepository";
 import { useNetwork } from "@/context/NetworkContext";
 import { useTabSwipe } from "@/hooks/useTabSwipe";
+import { getProgressVersion } from "@/lib/courseCompletion";
 
 export default function CoursesScreen() {
   const colors = useColors();
@@ -33,6 +34,7 @@ export default function CoursesScreen() {
   const hasLoadedOnce = useRef(false);
   const previousUserId = useRef(user?.id);
   const requestGenerationRef = useRef(0);
+  const loadedProgressVersion = useRef(getProgressVersion());
 
   useEffect(() => {
     if (previousUserId.current !== user?.id) {
@@ -48,6 +50,7 @@ export default function CoursesScreen() {
   const loadData = useCallback(async (isRefreshing = false) => {
     const requestId = ++requestGenerationRef.current;
     const requestUserId = user?.id;
+    loadedProgressVersion.current = getProgressVersion();
 
     if (!isRefreshing && !hasLoadedOnce.current) setIsLoading(true);
     try {
@@ -104,8 +107,13 @@ export default function CoursesScreen() {
     useCallback(() => {
       if (!hasLoadedOnce.current) {
         loadData(false); // first load only — cached after that
+      } else if (loadedProgressVersion.current !== getProgressVersion()) {
+        // A lesson was completed or a course enrolled since the last load
+        // (e.g. the final lesson on the learn screen): reload so progress and
+        // the Completed section are current without a pull-to-refresh.
+        loadData(true);
       }
-      // No refetch on tab switch — use pull-to-refresh for fresh data
+      // Otherwise no refetch on tab switch — use pull-to-refresh for fresh data
     }, [loadData])
   );
 
@@ -114,16 +122,20 @@ export default function CoursesScreen() {
     await loadData(true);
   };
 
+  // Completion follows the backend rule (lib/courseCompletion.ts); entries
+  // cached by an older build have no isCompleted and fall back to 100%.
+  const isDone = (c: any) => (typeof c.isCompleted === "boolean" ? c.isCompleted : c.progress === 100);
+
   const inProgressCourses = useMemo(() => {
-    return enrolledCourses.filter((c) => c.progress > 0 && c.progress < 100);
+    return enrolledCourses.filter((c) => !isDone(c) && c.progress > 0);
   }, [enrolledCourses]);
 
   const notStartedCourses = useMemo(() => {
-    return enrolledCourses.filter((c) => c.progress === 0);
+    return enrolledCourses.filter((c) => !isDone(c) && !(c.progress > 0));
   }, [enrolledCourses]);
 
   const completedCourses = useMemo(() => {
-    return enrolledCourses.filter((c) => c.progress === 100);
+    return enrolledCourses.filter((c) => isDone(c));
   }, [enrolledCourses]);
 
   const filteredBrowseCourses = useMemo(() => {

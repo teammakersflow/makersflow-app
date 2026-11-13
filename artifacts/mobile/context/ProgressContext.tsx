@@ -9,6 +9,7 @@ import {
   fetchRemoteProgress,
 } from "@/lib/progressStorage";
 import { ProgressCalculator } from "@/lib/progressCalculator";
+import { markProgressChanged } from "@/lib/courseCompletion";
 import * as courseDataProvider from "@/services/courseDataProvider";
 import { homeRepository } from "@/repositories/homeRepository";
 import { coursesRepository } from "@/repositories/coursesRepository";
@@ -100,6 +101,8 @@ export function ProgressProvider({ children }: { children: React.ReactNode }) {
   }
 
   async function invalidateRepositories() {
+    // Tell mounted tab screens (Home, My Learning, Progress) to reload on focus.
+    markProgressChanged();
     await Promise.all([
       homeRepository.invalidateProgressCache().catch(() => {}),
       coursesRepository.invalidateEnrollmentsCache().catch(() => {}),

@@ -30,6 +30,7 @@ import { isNetworkError } from "@/lib/networkUtils";
 import { ProgressCalculator } from "@/lib/progressCalculator";
 import { HomeSkeleton } from "@/components/SkeletonLoader";
 import { fetchCourseProgress, fetchCourseLessonsProgress } from "@/lib/progressStorage";
+import { getProgressVersion, isCourseComplete } from "@/lib/courseCompletion";
 
 function formatTotalTime(totalMinutes: number): string {
   const minutes = Math.round(totalMinutes);
@@ -79,11 +80,14 @@ export default function ProgressScreen() {
   const [leaderboard, setLeaderboard] = useState<any[]>([]);
   const [isLoadingLeaderboard, setIsLoadingLeaderboard] = useState(false);
 
+  const loadedProgressVersion = useRef(getProgressVersion());
+
   const loadStatsAndCourses = useCallback(async (isRefreshing = false) => {
     if (!user?.id) {
       setIsLoadingCourses(false);
       return;
     }
+    loadedProgressVersion.current = getProgressVersion();
     if (!isRefreshing) {
       setIsLoadingCourses(true);
     }
@@ -141,11 +145,14 @@ export default function ProgressScreen() {
 
         progressSum += courseProgPct;
 
-        if (enr.completed_at !== null) {
+        // enrollments.completed_at is never set for students; use the backend
+        // lesson rule (lib/courseCompletion.ts), still honouring completed_at.
+        const courseDone = isCourseComplete({ completedAt: enr.completed_at, isCompleted: prog.isCompleted });
+        if (courseDone) {
           completedCoursesCount++;
         }
 
-        if (courseProgPct > 0 && courseProgPct < 100) {
+        if (!courseDone && courseProgPct > 0) {
           coursesInProgress++;
         }
 
@@ -302,6 +309,9 @@ export default function ProgressScreen() {
       if (!hasLoadedOnce.current) {
         hasLoadedOnce.current = true;   // mark loaded so we never show the skeleton again
         loadStatsAndCourses(false); // first load only — instant on return
+      } else if (loadedProgressVersion.current !== getProgressVersion()) {
+        // A lesson or course was completed since the last load: refresh stats.
+        loadStatsAndCourses(true);
       }
     }, [loadStatsAndCourses])
   );

@@ -36,6 +36,7 @@ import { useProgress } from "@/context/ProgressContext";
 import { homeRepository, EMPTY_HOME_DATA } from "@/repositories/homeRepository";
 import { useNetwork } from "@/context/NetworkContext";
 import { useTabSwipe } from "@/hooks/useTabSwipe";
+import { getProgressVersion } from "@/lib/courseCompletion";
 
 const CATEGORY_DETAILS = [
   { name: "Robotics", icon: "construct", desc: "Build & program smart autonomous robots", btnText: "Start Now", btnColor: "#0B6FAD", textColor: "#FFF" },
@@ -277,7 +278,11 @@ export default function HomeScreen() {
   const reconnectDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── Single repository call — screen does not know data origin ─────────────
+  const loadedProgressVersion = useRef(getProgressVersion());
   const loadData = useCallback(async (isRefreshing = false) => {
+    // Recorded before any await so a quick refocus during this load does not
+    // start a second one.
+    loadedProgressVersion.current = getProgressVersion();
     if (!isRefreshing) setIsLoading(true);
     try {
       await refreshProgress().catch(() => {});
@@ -333,8 +338,12 @@ export default function HomeScreen() {
       if (!hasLoadedOnce.current) {
         hasLoadedOnce.current = true;   // mark loaded so we never show the skeleton again
         loadData(false); // first load — show skeleton
+      } else if (loadedProgressVersion.current !== getProgressVersion()) {
+        // Progress or enrollments changed elsewhere (e.g. a course was just
+        // finished): reload so the stats are current.
+        loadData(true);
       }
-      // No background refresh on focus — data stays cached in memory
+      // Otherwise no background refresh on focus — data stays cached in memory
       // User can pull-to-refresh manually if they want fresh data
     }, [loadData])
   );
@@ -396,7 +405,11 @@ export default function HomeScreen() {
     }
   };
 
-  const completedCount = enrolledCourses.filter((p) => p.completedAt !== null).length;
+  // enrollments.completed_at is never set for students, so it cannot be the
+  // only signal; isCompleted follows the backend lesson rule.
+  const completedCount = enrolledCourses.filter((p) =>
+    typeof p.isCompleted === "boolean" ? p.isCompleted : p.completedAt != null,
+  ).length;
   const avgProgress =
     enrolledCourses.length > 0
       ? Math.round(

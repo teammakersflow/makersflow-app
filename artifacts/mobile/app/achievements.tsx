@@ -165,11 +165,12 @@ export default function AchievementsScreen() {
             }
 
             const prog = await fetchCourseProgress(user.id, courseId);
-            if (prog.total > 0 && prog.completed >= prog.total) {
+            if (prog.isCompleted) {
               results.push({
                 courseId,
                 courseTitle,
-                completedAt: enr.completed_at ?? null,
+                // completed_at is empty here; use when the last lesson was completed.
+                completedAt: prog.completedAt ?? null,
                 level,
                 instructor,
               });
