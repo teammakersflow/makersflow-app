@@ -101,6 +101,15 @@ async function fetchAllMyEnrollments(): Promise<any[]> {
   }
 }
 /**
+ * ALL of the student's enrollment rows (active or not). Used where data must
+ * be shown regardless of current access, e.g. the course title and
+ * first-completion date for a certificate the learner already earned.
+ */
+export async function fetchMyEnrollmentRows(): Promise<any[]> {
+  return fetchAllMyEnrollments();
+}
+
+/**
  * Enrollments that grant access RIGHT NOW (My Courses, progress, home,
  * achievements). Same rule as the backend (B-2): payment_status in
  * completed/paid/free and not expired, free courses included. Expired,

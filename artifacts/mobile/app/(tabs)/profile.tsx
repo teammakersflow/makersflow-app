@@ -30,7 +30,8 @@ import { useColors } from "@/hooks/useColors";
 import { notificationService } from "@/services/notificationService";
 import { announcementService } from "@/services/announcementService";
 import { getCourseModules } from "@/services/courseDataProvider";
-import { fetchEnrolledCourses } from "@/services/enrollmentService";
+import { fetchEnrolledCourses, fetchMyEnrollmentRows } from "@/services/enrollmentService";
+import { earnedCertificatesNotCurrentlyCompleted } from "@/lib/certificateEntries";
 import { fetchCourseProgress } from "@/lib/progressStorage";
 import { resolveCompletionDate } from "@/lib/courseCompletion";
 import { fetchMyCertificates } from "@/services/certificateService";
@@ -162,8 +163,9 @@ export default function ProfileScreen() {
 
           const results: CompletedCourse[] = [];
           // Certificate issue dates are the stable "first completed" dates.
+          const certificates = await fetchMyCertificates();
           const certIssuedAt = new Map<string, string>();
-          (await fetchMyCertificates()).forEach((c) => certIssuedAt.set(String(c.course_id), c.issued_at));
+          certificates.forEach((c) => certIssuedAt.set(String(c.course_id), c.issued_at));
 
           for (const enr of validEnrollments) {
             const courseId = String(enr.course_id || enr.courses?.id);
@@ -191,6 +193,25 @@ export default function ProfileScreen() {
                 instructor,
               });
             }
+          }
+
+          // Certificates already earned stay visible (and counted) even when
+          // the course is In Progress again because lessons were added. They
+          // are never revoked or re-issued; title and first-completion date
+          // come from the enrollment row (active or not) and the certificate.
+          const earned = earnedCertificatesNotCurrentlyCompleted(
+            certificates,
+            results.map((r) => r.courseId),
+            await fetchMyEnrollmentRows().catch(() => validEnrollments),
+          );
+          for (const e of earned) {
+            results.push({
+              courseId: e.courseId,
+              courseTitle: e.courseTitle,
+              completedAt: e.completedAt ?? '',
+              level: e.level,
+              instructor: undefined,
+            });
           }
           setCompletedCourses(results);
         } catch (err) {

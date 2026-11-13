@@ -13,7 +13,7 @@
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { CACHE_VERSION } from '@/constants/cachePolicy';
+import { CACHE_VERSION, decodeCachePayload } from '@/constants/cachePolicy';
 import { USER_CACHE_KEYS } from '@/constants/storageKeys';
 
 // ── Public result type ───────────────────────────────────────────────────────
@@ -111,21 +111,13 @@ async function readRaw<T>(logicalKey: string): Promise<CachePayload<T> | null> {
   if (!key) return null;
   try {
     const raw = await AsyncStorage.getItem(key);
-    if (!raw) return null;
-
-    let payload: CachePayload<T>;
-    try {
-      payload = JSON.parse(raw);
-    } catch {
+    // Corrupt entries and entries from another CACHE_VERSION (an older build)
+    // are removed and never used (constants/cachePolicy.ts).
+    const { payload, discard } = decodeCachePayload<T>(raw);
+    if (discard) {
       await AsyncStorage.removeItem(key).catch(() => {});
       return null;
     }
-
-    if (!validateVersion(payload.version)) {
-      await AsyncStorage.removeItem(key).catch(() => {});
-      return null;
-    }
-
     return payload; // TTL check is left to the caller (needed for `stale` flag)
   } catch (e) {
     console.warn(`[cacheManager] readRaw failed for "${key}":`, e);
