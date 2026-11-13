@@ -18,7 +18,8 @@ import { useAuth } from "@/context/AuthContext";
 import { useColors } from "@/hooks/useColors";
 import { apiRequest } from "@/lib/auth/apiClient";
 import { getCourseModules } from "@/services/courseDataProvider";
-import { fetchEnrolledCourses } from "@/services/enrollmentService";
+import { fetchEnrolledCourses, fetchMyEnrollmentRows } from "@/services/enrollmentService";
+import { earnedCertificatesNotCurrentlyCompleted, type EarnedCertificateEntry } from "@/lib/certificateEntries";
 import { fetchCourseProgress } from "@/lib/progressStorage";
 import { fetchMyCertificatesStrict, type Certificate } from "@/services/certificateService";
 import { resolveCompletionDate } from "@/lib/courseCompletion";
@@ -42,6 +43,7 @@ export default function AchievementsScreen() {
 
   const [completedCourses, setCompletedCourses] = useState<CompletedCourse[]>([]);
   const [issuedCertificates, setIssuedCertificates] = useState<Certificate[]>([]);
+  const [earnedCertificates, setEarnedCertificates] = useState<EarnedCertificateEntry[]>([]);
   const [leaderboard, setLeaderboard] = useState<Array<{ id: string; name: string }>>([]);
   const [leaderboardLoading, setLeaderboardLoading] = useState(true);
   const [isLoading, setIsLoading] = useState(true);
@@ -132,6 +134,7 @@ export default function AchievementsScreen() {
         if (!user?.id) {
           setCompletedCourses([]);
           setIssuedCertificates([]);
+          setEarnedCertificates([]);
           setIsLoading(false);
           hasLoadedOnce.current = false;
           return;
@@ -140,8 +143,9 @@ export default function AchievementsScreen() {
         try {
           // Certificate issue dates are the stable "first completed" dates.
           const certIssuedAt = new Map<string, string>();
+          let certificates: Certificate[] = [];
           try {
-            const certificates = await fetchMyCertificatesStrict();
+            certificates = await fetchMyCertificatesStrict();
             setIssuedCertificates(certificates);
             certificates.forEach((c) => certIssuedAt.set(String(c.course_id), c.issued_at));
           } catch (certificateError) {
@@ -157,25 +161,17 @@ export default function AchievementsScreen() {
             const level = (enr.courses as any)?.level;
             const instructor = undefined;
 
-            if (enr.completed_at) {
-              results.push({
-                courseId,
-                courseTitle,
-                completedAt: enr.completed_at,
-                level,
-                instructor,
-              });
-              continue;
-            }
-
+            // Status is live (current lessons); completed_at alone never means
+            // "completed now" (an admin may have added lessons since).
             const prog = await fetchCourseProgress(user.id, courseId);
             if (prog.isCompleted) {
               results.push({
                 courseId,
                 courseTitle,
-                // First completion date: certificate issue date (never changes),
-                // else when the last lesson was completed.
+                // FIRST completion date: enrollments.completed_at (stamped once),
+                // else the certificate issue date, else the last lesson date.
                 completedAt: resolveCompletionDate({
+                  enrollmentCompletedAt: enr.completed_at,
                   certificateIssuedAt: certIssuedAt.get(courseId),
                   lessonCompletedAt: prog.completedAt,
                 }),
@@ -186,6 +182,15 @@ export default function AchievementsScreen() {
           }
 
           setCompletedCourses(results);
+          // Certificates earned for courses that are not complete right now
+          // (lessons added since): real title and first-completion date.
+          setEarnedCertificates(
+            earnedCertificatesNotCurrentlyCompleted(
+              certificates,
+              results.map((r) => r.courseId),
+              await fetchMyEnrollmentRows().catch(() => validEnrollments),
+            ),
+          );
         } catch (err) {
           console.error("[Achievements] error:", err);
         } finally {
@@ -207,17 +212,16 @@ export default function AchievementsScreen() {
         certificateNumber: certificate?.certificate_number,
       };
     }),
-    ...issuedCertificates
-      .filter((certificate) =>
-        !completedCourses.some(
-          (course) => course.courseId === String(certificate.course_id)
-        )
-      )
-      .map((certificate) => ({
-        courseId: String(certificate.course_id),
-        courseTitle: `Course #${certificate.course_id}`,
-        completedAt: null,
-        certificateNumber: certificate.certificate_number,
+    // Earned certificates whose course is In Progress again stay listed with
+    // their real title and original date (never revoked or re-issued).
+    ...earnedCertificates
+      .filter((entry) => !completedCourses.some((course) => course.courseId === entry.courseId))
+      .map((entry) => ({
+        courseId: entry.courseId,
+        courseTitle: entry.courseTitle,
+        completedAt: entry.completedAt,
+        level: entry.level,
+        certificateNumber: entry.certificateNumber,
       })),
   ];
 

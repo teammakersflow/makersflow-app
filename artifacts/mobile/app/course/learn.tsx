@@ -438,10 +438,10 @@ export default function LearnScreen() {
     return refreshSignedVideoUrl(id);
   }, [refreshSignedVideoUrl]);
 
-  // completed_at is never stamped for students (no student API writes it), so
-  // completion also follows the backend lesson rule (lib/courseCompletion.ts).
+  // Current status is live: every CURRENT lesson completed (backend rule).
+  // enrollment.completed_at is only the first-completion date; it stays set
+  // when an admin adds lessons, while the course is In Progress again.
   const isCourseCompleted =
-    !!enrollment?.completed_at ||
     isCourseCompleteFromLessons(lessonsProgress, lessons.map((l: any) => l.id));
   const completedModules = lessonsProgress.filter((p) => p.is_completed).length;
   const effectiveTotalLessons = totalLessons || lessons.length;

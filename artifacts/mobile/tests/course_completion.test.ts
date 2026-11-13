@@ -122,11 +122,16 @@ describe("screen-level completion helpers", () => {
     assert.equal(isCourseCompleteFromLessons([p("1", true)], [1]), true); // numeric ids
   });
 
-  test("completed_at still counts when an admin stamped it", () => {
-    assert.equal(isCourseComplete({ completedAt: "2026-11-01T00:00:00Z", isCompleted: false }), true);
-    assert.equal(isCourseComplete({ completedAt: null, isCompleted: true }), true);
-    assert.equal(isCourseComplete({ completedAt: null, isCompleted: false }), false);
+  // Owner decision 2026-11-13 (option 1): completed_at is the first-completion
+  // DATE; current status is only the live lesson rule.
+  test("current status comes only from the live lesson rule", () => {
+    assert.equal(isCourseComplete({ isCompleted: true }), true);
+    assert.equal(isCourseComplete({ isCompleted: false }), false);
+    assert.equal(isCourseComplete({ isCompleted: null }), false);
     assert.equal(isCourseComplete({}), false);
+    // a stamped completed_at cannot be passed in, let alone count
+    // @ts-expect-error completedAt is not part of the status input any more
+    assert.equal(isCourseComplete({ completedAt: "2026-11-01T00:00:00Z", isCompleted: false }), false);
   });
 
   test("progress-change signal increments", () => {
@@ -147,7 +152,8 @@ describe("screens use lesson-based completion, not completed_at alone", () => {
   test("Progress tab counts completed courses with isCourseComplete", () => {
     const src = strip(read("app/(tabs)/progress.tsx"));
     assert.doesNotMatch(src, /enr\.completed_at !== null/);
-    assert.match(src, /isCourseComplete\(\{ completedAt: enr\.completed_at, isCompleted: prog\.isCompleted \}\)/);
+    // Live status only; completed_at is the first-completion date (2026-11-13).
+    assert.match(src, /isCourseComplete\(\{ isCompleted: prog\.isCompleted \}\)/);
   });
 
   test("My Learning classifies by isCompleted", () => {

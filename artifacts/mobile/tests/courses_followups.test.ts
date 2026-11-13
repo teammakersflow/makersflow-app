@@ -240,7 +240,7 @@ describe("original completion date", () => {
     for (const f of ["app/(tabs)/profile.tsx", "app/achievements.tsx"]) {
       const src = strip(read(f));
       assert.match(src, /certIssuedAt\.set\(String\(c\.course_id\), c\.issued_at\)/, f);
-      assert.match(src, /resolveCompletionDate\(\{\s*certificateIssuedAt: certIssuedAt\.get\(courseId\),\s*lessonCompletedAt: prog\.completedAt,\s*\}\)/, f);
+      assert.match(src, /resolveCompletionDate\(\{\s*enrollmentCompletedAt: enr\.completed_at,\s*certificateIssuedAt: certIssuedAt\.get\(courseId\),\s*lessonCompletedAt: prog\.completedAt,\s*\}\)/, f);
     }
   });
 });

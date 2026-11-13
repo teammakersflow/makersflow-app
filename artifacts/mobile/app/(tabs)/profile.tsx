@@ -30,7 +30,8 @@ import { useColors } from "@/hooks/useColors";
 import { notificationService } from "@/services/notificationService";
 import { announcementService } from "@/services/announcementService";
 import { getCourseModules } from "@/services/courseDataProvider";
-import { fetchEnrolledCourses } from "@/services/enrollmentService";
+import { fetchEnrolledCourses, fetchMyEnrollmentRows } from "@/services/enrollmentService";
+import { earnedCertificatesNotCurrentlyCompleted } from "@/lib/certificateEntries";
 import { fetchCourseProgress } from "@/lib/progressStorage";
 import { resolveCompletionDate } from "@/lib/courseCompletion";
 import { fetchMyCertificates } from "@/services/certificateService";
@@ -162,8 +163,9 @@ export default function ProfileScreen() {
 
           const results: CompletedCourse[] = [];
           // Certificate issue dates are the stable "first completed" dates.
+          const certificates = await fetchMyCertificates();
           const certIssuedAt = new Map<string, string>();
-          (await fetchMyCertificates()).forEach((c) => certIssuedAt.set(String(c.course_id), c.issued_at));
+          certificates.forEach((c) => certIssuedAt.set(String(c.course_id), c.issued_at));
 
           for (const enr of validEnrollments) {
             const courseId = String(enr.course_id || enr.courses?.id);
@@ -171,21 +173,19 @@ export default function ProfileScreen() {
             const level = (enr.courses as any)?.level;
             const instructor = undefined;
 
-            if (enr.completed_at) {
-              results.push({ courseId, courseTitle, completedAt: enr.completed_at, level, instructor });
-              continue;
-            }
-
+            // Status is live (current lessons); completed_at alone never means
+            // "completed now" (an admin may have added lessons since).
             const prog = await fetchCourseProgress(user.id, courseId);
             if (prog.isCompleted) {
-              // No student API stamps completed_at, so use the certificate issue
-              // date (fixed at first completion), else when the last lesson
-              // was completed, never the enrollment date.
+              // Date = FIRST completion: enrollments.completed_at (stamped once by
+              // the backend), else the certificate issue date, else when the
+              // last lesson was completed. Never the enrollment date.
               results.push({
                 courseId,
                 courseTitle,
                 completedAt:
                   resolveCompletionDate({
+                    enrollmentCompletedAt: enr.completed_at,
                     certificateIssuedAt: certIssuedAt.get(courseId),
                     lessonCompletedAt: prog.completedAt,
                   }) ?? enr.enrolled_at ?? '',
@@ -193,6 +193,25 @@ export default function ProfileScreen() {
                 instructor,
               });
             }
+          }
+
+          // Certificates already earned stay visible (and counted) even when
+          // the course is In Progress again because lessons were added. They
+          // are never revoked or re-issued; title and first-completion date
+          // come from the enrollment row (active or not) and the certificate.
+          const earned = earnedCertificatesNotCurrentlyCompleted(
+            certificates,
+            results.map((r) => r.courseId),
+            await fetchMyEnrollmentRows().catch(() => validEnrollments),
+          );
+          for (const e of earned) {
+            results.push({
+              courseId: e.courseId,
+              courseTitle: e.courseTitle,
+              completedAt: e.completedAt ?? '',
+              level: e.level,
+              instructor: undefined,
+            });
           }
           setCompletedCourses(results);
         } catch (err) {

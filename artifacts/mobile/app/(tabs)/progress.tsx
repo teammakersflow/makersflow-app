@@ -151,9 +151,9 @@ export default function ProgressScreen() {
 
         progressSum += courseProgPct;
 
-        // enrollments.completed_at is never set for students; use the backend
-        // lesson rule (lib/courseCompletion.ts), still honouring completed_at.
-        const courseDone = isCourseComplete({ completedAt: enr.completed_at, isCompleted: prog.isCompleted });
+        // Current status is live (backend lesson rule). completed_at is only
+        // the first-completion date and never counts as "completed now".
+        const courseDone = isCourseComplete({ isCompleted: prog.isCompleted });
         if (courseDone) {
           completedCoursesCount++;
         }
