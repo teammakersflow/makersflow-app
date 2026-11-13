@@ -55,6 +55,17 @@ export function endpointTemplate(endpoint: string): string {
     .join("/");
 }
 
+/**
+ * Key of the shared "blocked until" gate. The API rate-limits per HANDLER,
+ * and GET /x and POST /x are different handlers with separate budgets, so
+ * the method is part of the key: a 429 on a write never blocks reads of the
+ * same path (and vice versa). HEAD is served by the GET handler.
+ */
+export function rateLimitKey(method: string | undefined, endpoint: string): string {
+  const m = (method || "GET").toUpperCase();
+  return `${m === "HEAD" ? "GET" : m} ${endpointTemplate(endpoint)}`;
+}
+
 export interface RateLimitGate {
   blockedUntil(template: string): number;
   block(template: string, untilMs: number): void;
@@ -94,7 +105,7 @@ export async function runWithRateLimitRetry<T>(o: RateLimitRetryOptions<T>): Pro
   const sleep = o.sleep ?? defaultSleep;
   const random = o.random ?? Math.random;
   const maxRetries = o.maxRetries ?? 1;
-  const template = endpointTemplate(o.endpoint);
+  const template = rateLimitKey(o.method, o.endpoint);
   const retryable = isRetryableMethod(o.method);
 
   // Another screen already got a 429 for this endpoint: do not add to it.

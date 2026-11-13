@@ -500,7 +500,7 @@ export function upsertLessonProgress(
 export async function fetchCourseProgress(
   userId: string,
   courseId: string | number,
-  opts?: { force?: boolean },
+  opts?: { force?: boolean; freshSince?: number },
 ) {
   try {
     // Shared with every other screen for this user+course (one request per

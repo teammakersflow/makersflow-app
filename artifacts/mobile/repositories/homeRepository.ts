@@ -169,7 +169,10 @@ async function fetchProducts(): Promise<any[]> {
   });
 }
 
-async function fetchProgress(userId: string, force = false): Promise<HomeProgress> {
+async function fetchProgress(
+  userId: string,
+  progressOpts: { force?: boolean; freshSince?: number } = {},
+): Promise<HomeProgress> {
   const enrollments = await fetchEnrolledCourses(userId);
   const lpData: any[] = [];
 
@@ -178,8 +181,10 @@ async function fetchProgress(userId: string, force = false): Promise<HomeProgres
       .filter((enr: any) => enr.courses)
       .map(async (enr: any) => {
         const cId = String(enr.courses.id);
-        // Shared per user+course request; `force` only for pull-to-refresh / Retry.
-        const prog = await fetchCourseProgress(userId, cId, { force });
+        // Shared per user+course request. A user refresh passes `freshSince`
+        // so the result its own forced progress refresh just fetched is reused
+        // (one request per course per refresh, not two).
+        const prog = await fetchCourseProgress(userId, cId, progressOpts);
         // Unknown progress must not be shown (or cached) as 0%.
         if (prog.failed) throw new CourseProgressUnavailableError(cId, prog.errorKind);
         try {
@@ -273,8 +278,11 @@ export const homeRepository = {
     isOffline: boolean,
     forceRefresh = false,
     onBackgroundUpdate?: (data: HomeData) => void,
-    /** Pull-to-refresh / Retry only: skip the short shared progress cache too. */
-    forceProgress = false,
+    /**
+     * Pull-to-refresh / Retry only. `freshSince`: reuse progress fetched since
+     * the refresh started (by the forced context refresh), fetch otherwise.
+     */
+    progressOpts: { force?: boolean; freshSince?: number } = {},
   ): Promise<RepositoryResult<HomeData>> {
     // M-25: captured before any fetch; late writes for another account are dropped.
     const scope = cacheManager.userScope();
@@ -376,7 +384,7 @@ export const homeRepository = {
       if (userId) {
         let fetched: HomeProgress | null;
         [fetched, unreadNotifCount] = await Promise.all([
-          fetchProgress(userId, forceProgress).catch((e) => {
+          fetchProgress(userId, progressOpts).catch((e) => {
             progressErrorKind = classifyApiError(e);
             return null;
           }),

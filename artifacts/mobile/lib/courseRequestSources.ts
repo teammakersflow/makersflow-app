@@ -58,9 +58,22 @@ interface Entry<T> {
   inflight?: { promise: Promise<T>; generation: number };
 }
 
+/**
+ * - force: skip the fresh value (user-initiated refresh); still joins a
+ *   request already running.
+ * - freshSince: accept only a value stored at/after this time (epoch ms),
+ *   e.g. one fetched earlier in the same user refresh; otherwise behave like
+ *   force. Lets the second step of a refresh reuse the first step's result
+ *   instead of forcing a duplicate request.
+ */
+export interface GetOptions {
+  force?: boolean;
+  freshSince?: number;
+}
+
 export interface SharedRequestCache<T> {
   /** Cached value if fresh, otherwise a (shared) request via `load`. */
-  get(key: string, load: () => Promise<T>, opts?: { force?: boolean }): Promise<T>;
+  get(key: string, load: () => Promise<T>, opts?: GetOptions): Promise<T>;
   /** Last successful value for the key, however old (never a failure). */
   peek(key: string): T | undefined;
   /** Mark one key stale. */
@@ -94,7 +107,16 @@ export function createSharedRequestCache<T>(options: SharedRequestCacheOptions):
   return {
     get(key, load, opts) {
       const e = entryFor(key);
-      if (!opts?.force && e.value !== undefined && e.freshAt > 0 && now() - e.freshAt < options.ttlMs) {
+      if (
+        opts?.freshSince !== undefined &&
+        e.value !== undefined &&
+        e.freshAt > 0 &&
+        e.freshAt >= opts.freshSince
+      ) {
+        return Promise.resolve(e.value);
+      }
+      const skipFresh = opts?.force === true || opts?.freshSince !== undefined;
+      if (!skipFresh && e.value !== undefined && e.freshAt > 0 && now() - e.freshAt < options.ttlMs) {
         return Promise.resolve(e.value);
       }
       // `force` skips the fresh value but still joins a request already
@@ -170,7 +192,7 @@ export function isValidListResponse(res: any): boolean {
 }
 
 export interface CourseRequestSources {
-  courseProgress(userId: string, courseId: string | number, opts?: { force?: boolean }): Promise<any>;
+  courseProgress(userId: string, courseId: string | number, opts?: GetOptions): Promise<any>;
   peekCourseProgress(userId: string, courseId: string | number): any | undefined;
   invalidateCourseProgress(userId: string, courseId?: string | number): void;
   allModules(owner: string | null | undefined, opts?: { force?: boolean }): Promise<any>;

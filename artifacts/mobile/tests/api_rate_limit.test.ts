@@ -19,6 +19,7 @@ import {
   createRateLimitGate,
   parseRetryAfterMs,
   endpointTemplate,
+  rateLimitKey,
   isRetryableMethod,
   MAX_AUTO_RETRY_WAIT_MS,
 } from "../lib/auth/retryPolicy.ts";
@@ -376,7 +377,7 @@ describe("429 retry policy", () => {
 
   test("a short block makes other reads wait instead of hitting the server", async () => {
     const h = harness();
-    h.gate.block(endpointTemplate("/lesson-progress/my/course/43"), h.now() + 3000);
+    h.gate.block(rateLimitKey("GET", "/lesson-progress/my/course/43"), h.now() + 3000);
     let calls = 0;
     const r = await runWithRateLimitRetry({
       ...h, method: "GET", endpoint: "/lesson-progress/my/course/21", send: async () => { calls++; return "ok"; },
@@ -509,5 +510,146 @@ describe("screens", () => {
     assert.ok((ps.match(/courseRequests\.invalidateCourseProgress\(userId, numCourseId\)/g) ?? []).length >= 3, "PATCH, POST, 409-PATCH");
     assert.match(ps, /courseRequests\.invalidateCourseProgress\(userId, courseId\);\s*return 'queued';/);
     assert.match(ps, /lookupCourseProgressIds\(userId, numCourseId, true\)/);
+  });
+});
+
+// ── Review fixes (2026-11-13) ────────────────────────────────────────────────
+describe("review fix 1: enrollment refreshes the shared /lessons copy", () => {
+  // GET /lessons returns content/notes only for courses the caller is entitled to.
+  function lessonsApi() {
+    const state = { enrolled: false, lessonCalls: 0 };
+    const getJson = async (p: string) => {
+      if (p === "/lessons") {
+        state.lessonCalls++;
+        return {
+          data: [{ id: 4301, module_id: 1, content: state.enrolled ? "Wire the motor" : null, notes: state.enrolled ? ["Use 5V"] : [] }],
+        };
+      }
+      if (p === "/modules") return { data: [{ id: 1, course_id: 43 }] };
+      throw new Error(p);
+    };
+    return { state, getJson };
+  }
+
+  test("after a successful enrollment the next /lessons read is fresh and entitled", async () => {
+    const api = lessonsApi();
+    const src = createCourseRequestSources({ getJson: api.getJson });
+    const before = await src.allLessons("u1");
+    assert.equal(before.data[0].content, null, "not entitled yet");
+
+    api.state.enrolled = true; // POST /enrollments/free succeeded
+    // without the fix the 15 s copy from before enrolling would be reused:
+    assert.equal((await src.allLessons("u1")).data[0].content, null);
+    assert.equal(api.state.lessonCalls, 1);
+
+    src.invalidateStructure(); // what onEntitlementGained() does
+    const after = await src.allLessons("u1");
+    assert.equal(api.state.lessonCalls, 2, "fetched again");
+    assert.equal(after.data[0].content, "Wire the motor");
+    assert.deepEqual(after.data[0].notes, ["Use 5V"]);
+  });
+
+  test("enrollInCourse invalidates only after the POST succeeded; the 409 path only once access is confirmed", () => {
+    const svc = strip(read("services/enrollmentService.ts"));
+    assert.match(svc, /export function onEntitlementGained\(\) \{\s*courseRequests\.invalidateStructure\(\);\s*\}/);
+    const enroll = svc.slice(svc.indexOf("export async function enrollInCourse"), svc.indexOf("async function fetchAllMyEnrollments"));
+    assert.match(enroll, /await apiClient\.post\('\/enrollments\/free'[\s\S]*?\);\s*onEntitlementGained\(\);\s*await invalidateCaches\(\);/);
+    const catchBlock = enroll.slice(enroll.indexOf("} catch"));
+    assert.doesNotMatch(catchBlock, /onEntitlementGained|invalidateStructure/, "a failed enrollment invalidates nothing");
+    const detail = strip(read("app/course/[id].tsx"));
+    assert.match(detail, /if \(!hasActiveAccess\(fresh, fresh\?\.courses\)\) \{[\s\S]*?return;\s*\}\s*onEntitlementGained\(\);/);
+  });
+});
+
+describe("review fix 2: one forced progress request per course per Home refresh", () => {
+  test("Home pull-to-refresh with 4 courses: 4 progress GETs (was 8)", async () => {
+    // BEFORE: forced context refresh, then Home's repository forced again.
+    const oldApi = fakeApi();
+    const oldSrc = createCourseRequestSources({ getJson: oldApi.getJson });
+    await Promise.all(courses.map((c) => oldSrc.courseProgress("u1", c)));
+    await Promise.all(courses.map((c) => oldSrc.courseProgress("u1", c, { force: true })));
+    await Promise.all(courses.map((c) => oldSrc.courseProgress("u1", c, { force: true })));
+    assert.equal(oldApi.count("/lesson-progress") - 4, 8, "old refresh: 8");
+
+    // AFTER: forced context refresh, then Home reuses results fetched since the refresh started.
+    let t = 1_000;
+    const api = fakeApi();
+    const src = createCourseRequestSources({ getJson: api.getJson, now: () => t });
+    await Promise.all(courses.map((c) => src.courseProgress("u1", c))); // earlier load
+    t += 5_000;
+    const refreshStartedAt = t;
+    await Promise.all(courses.map((c) => src.courseProgress("u1", c, { force: true }))); // context refresh
+    t += 200;
+    await Promise.all(courses.map((c) => Promise.all([
+      src.courseProgress("u1", c, { freshSince: refreshStartedAt }), // fetchCourseProgress
+      src.courseProgress("u1", c), // fetchCourseLessonsProgress
+    ])));
+    assert.equal(api.count("/lesson-progress") - 4, 4, "new refresh: 4");
+  });
+
+  test("freshSince never reuses a value older than the refresh; fetches if the forced request failed", async () => {
+    let t = 1_000;
+    let failCourse: number | null = null;
+    const calls: number[] = [];
+    const src = createCourseRequestSources({
+      now: () => t,
+      getJson: async (p) => {
+        const c = Number(p.split("/").pop());
+        calls.push(c);
+        if (c === failCourse) throw { status: 429 };
+        return progressBody(c, 1);
+      },
+    });
+    await src.courseProgress("u1", 43); // value at t=1000
+    t += 3_000;
+    const started = t;
+    failCourse = 43;
+    await assert.rejects(src.courseProgress("u1", 43, { force: true })); // forced refresh failed
+    failCourse = null;
+    await src.courseProgress("u1", 43, { freshSince: started });
+    assert.deepEqual(calls, [43, 43, 43], "the pre-refresh value (t=1000) was not reused");
+  });
+
+  test("Home passes freshSince for a user refresh; the context refresh stays the only forced request", () => {
+    const home = strip(read("app/(tabs)/index.tsx"));
+    assert.match(home, /const refreshStartedAt = Date\.now\(\);\s*try \{\s*if \(kind !== 'initial'\) \{\s*await refreshProgressRef\.current\(\{ force: kind === 'user' \}\)/);
+    assert.match(home, /kind === 'user' \? \{ freshSince: refreshStartedAt \} : \{\},/);
+    assert.doesNotMatch(home, /^\s*kind === 'user',\s*$/m);
+    const repo = strip(read("repositories/homeRepository.ts"));
+    assert.match(repo, /fetchCourseProgress\(userId, cId, progressOpts\)/);
+    assert.match(repo, /fetchProgress\(userId, progressOpts\)\.catch/);
+  });
+});
+
+describe("review fix 3: rate-limit blocking is per HTTP method", () => {
+  test("keys include the method; HEAD shares GET's handler", () => {
+    assert.equal(rateLimitKey("GET", "/lesson-progress/my/course/43"), "GET /lesson-progress/my/course/:id");
+    assert.equal(rateLimitKey("post", "/lesson-progress"), "POST /lesson-progress");
+    assert.equal(rateLimitKey("HEAD", "/x/1"), "GET /x/:id");
+    assert.equal(rateLimitKey(undefined, "/x"), "GET /x");
+  });
+
+  test("a 429 on POST does not block a GET to the same path", async () => {
+    const h = harness();
+    await assert.rejects(runWithRateLimitRetry({ ...h, method: "POST", endpoint: "/wishlist", send: async () => { throw rateLimited("60"); } }));
+    let gets = 0;
+    const r = await runWithRateLimitRetry({ ...h, method: "GET", endpoint: "/wishlist", send: async () => { gets++; return "list"; } });
+    assert.equal(r, "list");
+    assert.equal(gets, 1);
+    assert.deepEqual(h.sleeps, [], "no wait inherited from the write");
+  });
+
+  test("a 429 on GET does not block a POST to the same path (writes are never gated or retried)", async () => {
+    const h = harness();
+    await assert.rejects(runWithRateLimitRetry({ ...h, method: "GET", endpoint: "/wishlist", send: async () => { throw rateLimited("60"); } }));
+    let posts = 0;
+    const r = await runWithRateLimitRetry({ ...h, method: "POST", endpoint: "/wishlist", send: async () => { posts++; return "created"; } });
+    assert.equal(r, "created");
+    assert.equal(posts, 1);
+    // ...while another GET to that path is still blocked
+    await assert.rejects(
+      runWithRateLimitRetry({ ...h, method: "GET", endpoint: "/wishlist", send: async () => "x" }),
+      (e: any) => e.status === 429 && e.blockedFor > 0,
+    );
   });
 });

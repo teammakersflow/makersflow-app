@@ -315,6 +315,10 @@ export default function HomeScreen() {
     loadedProgressVersion.current = getProgressVersion();
     if (user?.id) loadedForUserRef.current = user.id;
     if (!isRefreshing) setIsLoading(true);
+    // A user refresh forces ONE progress request per course (the context
+    // refresh below); Home's own repository load then reuses anything fetched
+    // since this moment instead of forcing a second request per course.
+    const refreshStartedAt = Date.now();
     try {
       if (kind !== 'initial') {
         await refreshProgressRef.current({ force: kind === 'user' }).catch(() => {});
@@ -333,7 +337,7 @@ export default function HomeScreen() {
           setTotalHoursLearned(bgData.progress.totalHoursLearned);
           setUnreadNotifCount(bgData.unreadNotifCount);
         },
-        kind === 'user',
+        kind === 'user' ? { freshSince: refreshStartedAt } : {},
       );
       if (!isLatest()) return;
       const data = result.data;

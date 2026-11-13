@@ -35,7 +35,7 @@ import { useAuth } from "@/context/AuthContext";
 import { useFavorites } from "@/context/FavoritesContext";
 import { useRequireAuth } from "@/context/AuthRequireContext";
 import { getCourseById, getCourseModules } from "@/services/courseDataProvider";
-import { enrollInCourse, getEnrollment, isExpired, clearEnrollmentCache } from "@/services/enrollmentService";
+import { enrollInCourse, getEnrollment, isExpired, clearEnrollmentCache, onEntitlementGained } from "@/services/enrollmentService";
 import { fetchCourseLessonsProgress, fetchCourseLessonsProgressStrict } from "@/lib/progressStorage";
 import { LoadErrorNotice } from "@/components/LoadErrorNotice";
 import { classifyApiError, loadErrorMessage, type ApiErrorKind } from "@/lib/apiErrorKind";
@@ -483,6 +483,9 @@ export default function CourseDetailScreen() {
             );
             return;
           }
+          // Access confirmed (e.g. renewed elsewhere): lesson content/notes are
+          // now returned, so do not reuse the pre-enrollment /lessons copy.
+          onEntitlementGained();
           setEnrollment(fresh);
           setIsEnrolled(true);
           setEnrollmentStatusKnown(true);
