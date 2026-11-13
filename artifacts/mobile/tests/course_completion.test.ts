@@ -194,7 +194,8 @@ describe("tab screens reload after progress changes", () => {
     assert.match(strip(read("services/enrollmentService.ts")), /async function invalidateCaches\(\) \{\s*clearEnrollmentCache\(\);\s*markProgressChanged\(\);/);
     const ps = strip(read("lib/progressStorage.ts"));
     assert.match(ps, /watchPercentage >= 90\) markProgressChanged\(\)/);
-    assert.match(ps, /if \(sent > 0\) markProgressChanged\(\)/);
+    // 2026-11-13 (review M5): the flush returns a report.
+    assert.match(ps, /if \(report\.sent > 0\) markProgressChanged\(\)/);
   });
 
   for (const f of ["app/(tabs)/courses.tsx", "app/(tabs)/index.tsx", "app/(tabs)/progress.tsx"]) {

@@ -44,6 +44,14 @@ import { ActivityIndicator } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { fetchMyReview, upsertReview } from "@/services/reviewService";
 import { issueCertificate } from "@/services/certificateService";
+import {
+  ALREADY_COMPLETE,
+  createCompletionRetryScheduler,
+  createLessonCompletionGuard,
+  lessonCompletionKey,
+  type CompletionTicket,
+} from "@/lib/lessonCompletionGuard";
+import { parseRetryAfterMs } from "@/lib/auth/retryPolicy";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -52,14 +60,36 @@ function formatBytes(bytes: number): string {
 }
 
 /** Module-level so memoised callbacks can use it safely. */
-function notifyCompletionQueued() {
-  const message = "Saved on this device. It will sync when you're back online.";
+/**
+ * The completion could not be sent and is kept on this device. The message
+ * says why: offline/timeout, server busy (HTTP 429), or a server problem.
+ */
+function notifyCompletionQueued(kind: ApiErrorKind) {
+  const message =
+    kind === 'rate_limited'
+      ? "Server is busy. Your completion is saved on this device and will sync automatically."
+      : kind === 'network' || kind === 'timeout'
+        ? "Saved on this device. It will sync when you're back online."
+        : "Couldn't reach the server. Your completion is saved on this device and will sync automatically.";
   if (Platform.OS === 'android') {
     ToastAndroid.show(message, ToastAndroid.SHORT);
   } else {
     Alert.alert('', message);
   }
 }
+
+/** What one completion request produced (shared by everyone waiting on it). */
+interface CompletionOutcome {
+  result: 'synced' | 'queued';
+  failure?: unknown;
+}
+
+/**
+ * One completion request per lesson at a time, shared by the Mark Lesson
+ * Complete button and automatic completion at 90% watched. Module-level so a
+ * request still in flight is joined even if the screen is reopened.
+ */
+const lessonCompletionGuard = createLessonCompletionGuard();
 
 export default function LearnScreen() {
   const colors = useColors();
@@ -101,7 +131,9 @@ export default function LearnScreen() {
   const [downloadingLessonId, setDownloadingLessonId] = useState<string | null>(null);
   const [isDownloading, setIsDownloading] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState<number | null>(null);
-  const [isMarkingComplete, setIsMarkingComplete] = useState(false);
+  // Lesson whose completion request (button or automatic) is in flight: the
+  // button is disabled and shows "Saving..." until it settles.
+  const [completingLessonId, setCompletingLessonId] = useState<string | null>(null);
   // Manual completions saved in the outbox but not yet confirmed by the
   // backend. Shown as "waiting to sync"; never counted toward course completion.
   const [pendingCompletionIds, setPendingCompletionIds] = useState<string[]>([]);
@@ -159,7 +191,7 @@ export default function LearnScreen() {
   const [signedVideoUrl, setSignedVideoUrl] = useState<string | null>(null);
   const [isSignedUrlLoading, setIsSignedUrlLoading] = useState(false);
   // M-22: why the signed URL is missing (drives the error/retry UI) + retry trigger.
-  const [signedUrlError, setSignedUrlError] = useState<null | "network" | "forbidden" | "unavailable">(null);
+  const [signedUrlError, setSignedUrlError] = useState<null | "network" | "busy" | "forbidden" | "unavailable">(null);
   const [signedUrlAttempt, setSignedUrlAttempt] = useState(0);
 
   const [myReview, setMyReview] = useState<any>(null);
@@ -375,6 +407,9 @@ export default function LearnScreen() {
       return url;
     } catch (err: any) {
       console.warn('[LearnScreen] Signed video URL refresh failed:', err?.message ?? err);
+      // HTTP 429 is passed on so the player can say "server is busy" and stop
+      // retrying; other failures keep the existing "could not refresh" path.
+      if ((err?.status ?? err?.statusCode) === 429 && activeLessonIdRef.current === lessonId) throw err;
       return null;
     }
   }, [fetchSignedVideoUrl]);
@@ -419,7 +454,12 @@ export default function LearnScreen() {
         if (!cancelled) {
           console.warn('[LearnScreen] Signed video URL fetch failed:', err?.message ?? err);
           const status = err?.status ?? err?.statusCode ?? err?.response?.status;
-          setSignedUrlError(status === 401 || status === 403 ? "forbidden" : "network");
+          // 429: the server asked us to wait. Say so (not "check your
+          // connection"); "Try again" during the cooldown is not sent again
+          // (lib/auth/retryPolicy.ts gate).
+          setSignedUrlError(
+            status === 401 || status === 403 ? "forbidden" : status === 429 ? "busy" : "network",
+          );
           setSignedVideoUrl(null);
         }
       })
@@ -461,6 +501,7 @@ export default function LearnScreen() {
   // M-18: explicit choice. "Start over" must not briefly resume the old position.
   const initialTime = showResumeModal || startOverLessonId === activeModuleId ? 0 : (activeLessonProgress?.current_time_secs ?? 0);
   const isSaved = activeModule ? isInWatchLater(activeModule.id) : false;
+  const isMarkingComplete = !!activeModule && completingLessonId === String(activeModule.id);
 
   // Stable callbacks — prevent VideoPlayerEnhanced from recreating its
   // polling interval on every render (Bug 3 & 7)
@@ -470,27 +511,78 @@ export default function LearnScreen() {
     await upsertLessonProgress(user.id, Number(courseId), Number(activeModule.id), currentTime, watchPercentage);
   }, [user?.id, courseId, activeModule?.id]);
 
-  const handleVideoComplete = useCallback(async () => {
-    if (!user?.id || !courseId || !activeModule?.id) return;
-    const result = await markLessonComplete(user.id, Number(courseId), Number(activeModule.id));
-    if (result === 'queued') {
+  // Latest progress for the "already completed" check: the callbacks below are
+  // memoised and must not read a stale render's state.
+  const lessonsProgressRef = useRef(lessonsProgress);
+  lessonsProgressRef.current = lessonsProgress;
+  const pendingCompletionIdsRef = useRef(pendingCompletionIds);
+  pendingCompletionIdsRef.current = pendingCompletionIds;
+  const userIdRef = useRef(user?.id);
+  userIdRef.current = user?.id;
+  // Review M3: a closed screen never navigates or shows modals.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+  // Review M2: one independent automatic re-send per lesson after HTTP 429.
+  // Cleared on unmount; the completion stays in the outbox, which the app
+  // flushes on foreground / reconnect / sign-in (and after Retry-After).
+  const completionRetries = useRef(createCompletionRetryScheduler()).current;
+  const runLessonCompletionRef = useRef<(lessonId: string) => Promise<void>>(async () => {});
+  useEffect(() => () => completionRetries.cancelAll(), [completionRetries]);
+  useEffect(() => { completionRetries.cancelAll(); }, [user?.id, completionRetries]);
+
+  /** Server-confirmed completion: show the lesson as completed right away. */
+  const showLessonCompleted = useCallback((lessonId: string) => {
+    setPendingCompletionIds((prev) => prev.filter((id) => id !== String(lessonId)));
+    setLessonsProgress((prev) =>
+      prev.some((p) => String(p.lesson_id) === String(lessonId))
+        ? prev.map((p) => (String(p.lesson_id) === String(lessonId) ? { ...p, is_completed: true } : p))
+        : [...prev, { lesson_id: Number(lessonId), is_completed: true, watch_percentage: 100 }],
+    );
+  }, []);
+
+  /**
+   * Follow-up of one completion request. Runs once per request (only for the
+   * caller that claimed the ticket). The data steps (context refresh, course
+   * completion, certificate issue) also run when the screen was closed; the
+   * certificate screen and the modal are only shown by a mounted screen.
+   */
+  const handleCompletionOutcome = useCallback(async (lessonId: string, userId: string, outcome: CompletionOutcome) => {
+    const key = lessonCompletionKey(userId, courseId!, lessonId);
+    if (outcome.result === 'queued') {
       // Not confirmed: show it as waiting to sync, never as a finished course.
-      setPendingCompletionIds((prev) => Array.from(new Set([...prev, String(activeModule.id)])));
-      notifyCompletionQueued();
+      setPendingCompletionIds((prev) => Array.from(new Set([...prev, String(lessonId)])));
+      const kind = classifyApiError(outcome.failure);
+      if (mountedRef.current) notifyCompletionQueued(kind);
+      if (kind === 'rate_limited' && mountedRef.current) {
+        completionRetries.schedule(
+          key,
+          parseRetryAfterMs((outcome.failure as any)?.retryAfter ?? null, Date.now()),
+          () => {
+            if (mountedRef.current && userIdRef.current === userId && pendingCompletionIdsRef.current.includes(String(lessonId))) {
+              void runLessonCompletionRef.current(String(lessonId));
+            }
+          },
+        );
+      }
       return;
     }
-    await completeModule(String(Number(courseId)), String(Number(activeModule.id)));
+    completionRetries.succeeded(key);
+    showLessonCompleted(lessonId);
+    await completeModule(String(Number(courseId)), String(Number(lessonId)));
     // null = the reload failed: progress is unknown, so skip the course-completion check.
     const updatedProgress = (await reloadProgress()) ?? [];
-    await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    if (mountedRef.current) await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
 
     const completedCount = updatedProgress.filter((p) => p.is_completed).length;
     if (totalLessons > 0 && completedCount >= totalLessons) {
       let completedEnrollment = enrollment;
       if (!completedEnrollment?.completed_at) {
         try {
-          await completeCourse(user.id, Number(courseId));
-          completedEnrollment = await getEnrollment(user.id, Number(courseId));
+          await completeCourse(userId, Number(courseId));
+          completedEnrollment = await getEnrollment(userId, Number(courseId));
           setEnrollment(completedEnrollment);
         } catch (e) {
           console.error('[CompleteCourse] error:', e);
@@ -500,31 +592,105 @@ export default function LearnScreen() {
         const issuedCertificate = await issueCertificate(Number(courseId));
         if (!issuedCertificate) { throw new Error('Certificate issuance returned no certificate.'); }
 
-        const certKey = `@cert_shown:${user.id}:${courseId}`;
+        const certKey = `@cert_shown:${userId}:${courseId}`;
         const alreadyShown = await AsyncStorage.getItem(certKey);
-        if (!alreadyShown) {
+        // A closed screen (or another account) never navigates.
+        if (!alreadyShown && mountedRef.current && userIdRef.current === userId) {
           await AsyncStorage.setItem(certKey, 'true');
           router.push({
             pathname: '/certificate',
             params: {
               courseName: course?.title ?? '',
-              studentName: user.name ?? '',
+              studentName: user?.name ?? '',
               completionDate: completedEnrollment?.completed_at ?? enrollment?.completed_at ?? issuedCertificate?.issued_at ?? '',
               courseId: String(courseId ?? ''),
-                certNumber: issuedCertificate?.certificate_number ?? '',
+              certNumber: issuedCertificate?.certificate_number ?? '',
               level: (course as any)?.level,
               instructor: (course as any)?.instructor,
             },
           });
           return;
         }
-
       } catch (certificateError) {
         console.error('[Certificate] issuance/display failed:', certificateError);
       }
     }
-    setShowCompleteModal(true);
-  }, [user?.id, courseId, activeModule?.id, totalLessons, enrollment?.completed_at, course?.title, lessons, reloadProgress]);
+    if (mountedRef.current) setShowCompleteModal(true);
+  }, [courseId, totalLessons, enrollment, course?.title, user?.name, reloadProgress, completeModule, completionRetries, showLessonCompleted]);
+
+  /**
+   * Completes one lesson. Shared by the Mark Lesson Complete button and the
+   * player's automatic completion at 90% watched (lib/playbackTracker.ts):
+   * - one request per lesson at a time: repeated taps, or a tap during the
+   *   automatic completion, join the request in flight (lib/lessonCompletionGuard.ts);
+   * - nothing is sent for a lesson the backend already reports as completed;
+   * - the write is never retried by the HTTP layer (lib/auth/retryPolicy.ts).
+   *   A failure (offline, HTTP 429, 5xx) is kept in the outbox and shown as
+   *   "waiting to sync", never as completed; after a 429 it is re-sent once
+   *   the server's Retry-After has passed.
+   */
+  const runLessonCompletion = useCallback(async (lessonId: string): Promise<void> => {
+    if (!user?.id || !courseId || !lessonId) return;
+    const userId = user.id;
+    const isConfirmedComplete = () =>
+      !!lessonsProgressRef.current.find((p) => String(p.lesson_id) === String(lessonId))?.is_completed;
+    if (isConfirmedComplete()) return;
+    setCompletingLessonId(lessonId);
+    try {
+      const ticket = await lessonCompletionGuard.run<CompletionOutcome>(
+        lessonCompletionKey(userId, courseId, lessonId),
+        isConfirmedComplete,
+        async () => {
+          let failure: unknown;
+          const result = await markLessonComplete(userId, Number(courseId), Number(lessonId), {
+            onFailure: (e) => { failure = e; },
+          });
+          return { result, failure };
+        },
+      );
+      if (ticket === ALREADY_COMPLETE) return;
+      if (ticket.value.result === 'synced' && mountedRef.current) showLessonCompleted(lessonId);
+      if (ticket.claim()) await handleCompletionOutcome(lessonId, userId, ticket.value);
+    } catch (e) {
+      console.error('[completeLesson] error:', e);
+      if (mountedRef.current) showToast('Failed to mark lesson complete. Please try again.');
+    } finally {
+      if (mountedRef.current) setCompletingLessonId((cur) => (cur === lessonId ? null : cur));
+    }
+  }, [user?.id, courseId, handleCompletionOutcome, showLessonCompleted]);
+  runLessonCompletionRef.current = runLessonCompletion;
+
+  // Review M3: reopening a lesson whose completion is still being sent (or
+  // finished while no screen was open) shows that state instead of an
+  // incomplete lesson, and never sends a second write for it.
+  useEffect(() => {
+    if (!user?.id || !courseId || !activeModuleId) return;
+    const userId = user.id;
+    const lessonId = String(activeModuleId);
+    const key = lessonCompletionKey(userId, courseId, lessonId);
+    let alive = true;
+    const settle = async (ticket: CompletionTicket<CompletionOutcome>) => {
+      if (!alive) return;
+      if (ticket.value.result === 'synced') showLessonCompleted(lessonId);
+      if (ticket.claim()) await handleCompletionOutcome(lessonId, userId, ticket.value);
+    };
+    const running = lessonCompletionGuard.inFlight<CompletionOutcome>(key);
+    if (running) {
+      setCompletingLessonId(lessonId);
+      running
+        .then(settle, () => {})
+        .finally(() => { if (alive) setCompletingLessonId((cur) => (cur === lessonId ? null : cur)); });
+    } else {
+      const done = lessonCompletionGuard.unclaimed<CompletionOutcome>(key);
+      if (done) void settle(done);
+    }
+    return () => { alive = false; };
+  }, [user?.id, courseId, activeModuleId, handleCompletionOutcome, showLessonCompleted]);
+
+  // Automatic completion: the player reports it once, at 90% watched.
+  const handleVideoComplete = useCallback(() => {
+    if (activeModule?.id) void runLessonCompletion(String(activeModule.id));
+  }, [activeModule?.id, runLessonCompletion]);
 
   useEffect(() => {
     if (!user?.id || !courseId || isLoading) return;
@@ -713,68 +879,11 @@ export default function LearnScreen() {
     return lessons[currentIndex - 1];
   };
 
-  const handleMarkComplete = async () => {
-    if (!user?.id || !courseId || !activeModule?.id) return;
-    if (isMarkingComplete) return;
-    setIsMarkingComplete(true);
-    try {
-      const result = await markLessonComplete(user.id, courseId, activeModule.id);
-      if (result === 'queued') {
-        // Not confirmed: show it as waiting to sync, never as a finished course.
-        setPendingCompletionIds((prev) => Array.from(new Set([...prev, String(activeModule.id)])));
-        notifyCompletionQueued();
-        return;
-      }
-      await completeModule(courseId, activeModule.id);
-      // null = the reload failed: progress is unknown, so skip the course-completion check.
-      const updatedProgress = (await reloadProgress()) ?? [];
-      await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-
-      const completedCount = updatedProgress.filter((p) => p.is_completed).length;
-      if (totalLessons > 0 && completedCount >= totalLessons) {
-        let completedEnrollment = enrollment;
-        if (!completedEnrollment?.completed_at) {
-          try {
-            await completeCourse(user.id, courseId);
-            completedEnrollment = await getEnrollment(user.id, courseId);
-            setEnrollment(completedEnrollment);
-          } catch (e) {
-            console.error('[CompleteCourse] error:', e);
-          }
-        }
-        try {
-          const issuedCertificate = await issueCertificate(Number(courseId));
-          if (!issuedCertificate) { throw new Error('Certificate issuance returned no certificate.'); }
-          const certKey = `@cert_shown:${user.id}:${courseId}`;
-          const alreadyShown = await AsyncStorage.getItem(certKey);
-          if (!alreadyShown) {
-            await AsyncStorage.setItem(certKey, 'true');
-            router.push({
-              pathname: '/certificate',
-              params: {
-                courseName: course?.title ?? '',
-                studentName: user.name ?? '',
-                completionDate: completedEnrollment?.completed_at ?? enrollment?.completed_at ?? issuedCertificate?.issued_at ?? '',
-                courseId: String(courseId ?? ''),
-                certNumber: issuedCertificate?.certificate_number ?? '',
-                level: (course as any)?.level,
-                instructor: (course as any)?.instructor,
-              },
-            });
-            return;
-          }
-
-        } catch (certificateError) {
-          console.error('[Certificate] issuance/display failed:', certificateError);
-        }
-      }
-      setShowCompleteModal(true);
-    } catch (e) {
-      console.error('[markComplete] error:', e);
-      showToast('Failed to mark lesson complete. Please try again.');
-    } finally {
-      setIsMarkingComplete(false);
-    }
+  // Manual completion (Mark Lesson Complete). Same guarded path as the
+  // automatic one: rapid taps send one request.
+  const handleMarkComplete = () => {
+    if (!activeModule?.id) return;
+    void runLessonCompletion(String(activeModule.id));
   };
 
   const handlePreviousLesson = async () => {
@@ -1003,6 +1112,8 @@ export default function LearnScreen() {
                   <Text style={[styles.expiryText, { color: colors.foreground }]}>
                     {signedUrlError === "network"
                       ? "Couldn't load this video. Check your connection and try again."
+                      : signedUrlError === "busy"
+                        ? "Server is busy. Please wait a moment, then try again."
                       : signedUrlError === "forbidden"
                         ? "This video is not available on this account."
                         : "This video is temporarily unavailable."}
@@ -1072,12 +1183,24 @@ export default function LearnScreen() {
         if (isWaitingToSync) {
           return (
             <View style={[styles.actionButtonContainer, { backgroundColor: colors.card, borderBottomColor: colors.border }]}>
-              <View style={[styles.markCompleteBtn, { backgroundColor: colors.muted }]}>
-                <Ionicons name="cloud-upload-outline" size={16} color={colors.mutedForeground} />
+              {/* Not confirmed yet: tap to try sending it again (same guarded
+                  request; during a 429 cooldown nothing is sent). */}
+              <Pressable
+                style={[styles.markCompleteBtn, { backgroundColor: colors.muted }]}
+                onPress={handleMarkComplete}
+                disabled={isMarkingComplete}
+                accessibilityRole="button"
+                accessibilityState={{ disabled: isMarkingComplete, busy: isMarkingComplete }}
+              >
+                {isMarkingComplete ? (
+                  <RNActivityIndicator size="small" color={colors.mutedForeground} />
+                ) : (
+                  <Ionicons name="cloud-upload-outline" size={16} color={colors.mutedForeground} />
+                )}
                 <Text style={[styles.markCompleteBtnText, { color: colors.mutedForeground }]}>
-                  Completed · waiting to sync
+                  {isMarkingComplete ? 'Saving...' : 'Completed · waiting to sync · Tap to retry'}
                 </Text>
-              </View>
+              </Pressable>
             </View>
           );
         }
@@ -1094,6 +1217,8 @@ export default function LearnScreen() {
               style={[styles.markCompleteBtn, { backgroundColor: '#17E5D3' }]}
               onPress={handleMarkComplete}
               disabled={isMarkingComplete}
+              accessibilityRole="button"
+              accessibilityState={{ disabled: isMarkingComplete, busy: isMarkingComplete }}
             >
               {isMarkingComplete ? (
                 <RNActivityIndicator size="small" color="#063B4F" />

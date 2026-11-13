@@ -8,5 +8,5 @@ import { apiClient } from '@/lib/auth/apiClient';
 import { createCourseRequestSources } from '@/lib/courseRequestSources';
 
 export const courseRequests = createCourseRequestSources({
-  getJson: (path) => apiClient.get<any>(path),
+  getJson: (path, forUserId) => apiClient.get<any>(path, forUserId ? { expectedUserId: forUserId } : undefined),
 });

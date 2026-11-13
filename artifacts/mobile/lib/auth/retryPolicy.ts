@@ -11,6 +11,11 @@
  * - a shared gate remembers "this endpoint is blocked until T", so other
  *   screens' reads to the same endpoint wait (short blocks) or fail fast (long
  *   blocks) instead of all hitting the server again: no retry storms;
+ * - writes (POST/PATCH/PUT/DELETE) are never retried. Lesson-progress writes
+ *   (playback saves every 5 s, completions) are also not sent while their own
+ *   endpoint is in a known cooldown: they fail at once with a 429 error and
+ *   the caller keeps the data in the progress outbox. Other writes (auth,
+ *   payments, ...) are sent as before;
  * - an aborted request is never retried.
  * 401 handling (token refresh) is untouched and lives in apiClient.
  *
@@ -20,6 +25,14 @@
 export const MAX_AUTO_RETRY_WAIT_MS = 10_000;
 export const BACKOFF_BASE_MS = 1_000;
 export const BACKOFF_JITTER_MS = 500;
+
+/** Writes that are held back (not sent) during their endpoint's 429 cooldown. */
+export const COOLDOWN_GATED_WRITE_PREFIXES = ["/lesson-progress"];
+
+export function isCooldownGatedWrite(template: string): boolean {
+  const path = template.slice(template.indexOf(" ") + 1);
+  return COOLDOWN_GATED_WRITE_PREFIXES.some((p) => path === p || path.startsWith(p + "/"));
+}
 
 export function isRetryableMethod(method: string | undefined): boolean {
   const m = (method || "GET").toUpperCase();
@@ -108,11 +121,16 @@ export async function runWithRateLimitRetry<T>(o: RateLimitRetryOptions<T>): Pro
   const template = rateLimitKey(o.method, o.endpoint);
   const retryable = isRetryableMethod(o.method);
 
-  // Another screen already got a 429 for this endpoint: do not add to it.
-  if (retryable) {
+  // Another request already got a 429 for this endpoint: do not add to it.
+  // Reads wait out a short cooldown (or fail fast on a long one). Lesson-
+  // progress writes are never delayed or replayed by this layer: they fail
+  // fast (not sent) for the whole cooldown and stay in the progress outbox.
+  if (retryable || isCooldownGatedWrite(template)) {
     const wait = o.gate.blockedUntil(template) - now();
-    if (wait > MAX_AUTO_RETRY_WAIT_MS) throw o.blockedError(wait);
-    if (wait > 0) await sleep(wait + Math.floor(random() * 250));
+    if (wait > 0) {
+      if (!retryable || wait > MAX_AUTO_RETRY_WAIT_MS) throw o.blockedError(wait);
+      await sleep(wait + Math.floor(random() * 250));
+    }
   }
 
   for (let attempt = 0; ; attempt++) {
