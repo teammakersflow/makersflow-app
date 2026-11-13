@@ -3,6 +3,7 @@ import { emitSessionExpired } from '@/lib/sessionEvents';
 import { Platform } from 'react-native';
 import * as Device from 'expo-device';
 import Constants from 'expo-constants';
+import { createRateLimitGate, runWithRateLimitRetry } from './retryPolicy';
 
 export function getApiBaseUrl(): string {
   const envUrl = process.env.EXPO_PUBLIC_API_URL;
@@ -53,12 +54,18 @@ export class ApiError extends Error {
   constructor(
     public status: number,
     message: string,
-    public data?: any
+    public data?: any,
+    /** Raw Retry-After header of a 429 response (lib/auth/retryPolicy.ts). */
+    public retryAfter?: string | null,
   ) {
     super(message);
     this.name = 'ApiError';
   }
 }
+
+// One gate for the whole app: a 429 seen by any screen makes every other
+// read of that endpoint wait (short block) or fail fast (long block).
+const rateLimitGate = createRateLimitGate();
 
 /** M-6: upper bound for POST /auth/refresh. */
 const REFRESH_TIMEOUT_MS = 15_000;
@@ -156,8 +163,31 @@ export function isApiOrigin(url: string, baseUrl: string): boolean {
 
 /**
  * Centralized fetch HTTP API Client with timeout, auth header injection, and 401 token refresh interceptor.
+ *
+ * HTTP 429 (2026-11-13): reads are retried at most once, honouring
+ * Retry-After (or a short backoff with jitter); writes are never retried; a
+ * shared gate stops other screens piling onto a rate-limited endpoint
+ * (lib/auth/retryPolicy.ts). The error keeps its status so screens can say
+ * "server is busy" instead of "check your connection".
  */
 export async function apiRequest<T = any>(
+  endpoint: string,
+  options: RequestInit = {},
+  isRetry = false
+): Promise<T> {
+  return runWithRateLimitRetry<T>({
+    method: options.method || 'GET',
+    endpoint,
+    send: () => sendApiRequest<T>(endpoint, options, isRetry),
+    gate: rateLimitGate,
+    blockedError: (waitMs) =>
+      new ApiError(429, 'Too many requests. Please try again shortly.', undefined, String(Math.ceil(waitMs / 1000))),
+    signal: options.signal,
+  });
+}
+
+/** One attempt (with the existing 401 refresh-and-retry-once behaviour). */
+async function sendApiRequest<T = any>(
   endpoint: string,
   options: RequestInit = {},
   isRetry = false
@@ -203,14 +233,16 @@ export async function apiRequest<T = any>(
       if (!newToken) {
         throw new ApiError(401, 'Session expired. Please log in again.');
       }
-      return apiRequest<T>(endpoint, options, true);
+      // Single attempt: the outer 429 policy already wraps this request.
+      return sendApiRequest<T>(endpoint, options, true);
     }
     if (!response.ok) {
       const errorData = await response.json().catch(() => null);
       throw new ApiError(
         response.status,
         errorData?.message || errorData?.error || `HTTP request failed with status ${response.status}`,
-        errorData
+        errorData,
+        response.status === 429 ? response.headers?.get?.('retry-after') ?? null : undefined,
       );
     }
 

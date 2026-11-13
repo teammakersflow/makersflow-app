@@ -32,7 +32,8 @@ import { isNetworkError } from '@/lib/networkUtils';
 import { firstThumbnailUrl, parseThumbnailUrls } from '@/lib/thumbnailUtils';
 import { fetchAllCourses } from '@/services/courseDataProvider';
 import { fetchEnrolledCourses } from '@/services/enrollmentService';
-import { fetchCourseProgress } from '@/lib/progressStorage';
+import { fetchCourseProgress, CourseProgressUnavailableError } from '@/lib/progressStorage';
+import { classifyApiError } from '@/lib/apiErrorKind';
 import { isCourseComplete } from '@/lib/courseCompletion';
 import { fetchCourseRatingsSummary } from '@/services/reviewService';
 
@@ -121,17 +122,18 @@ async function fetchCatalog(): Promise<CourseCatalogItem[]> {
   });
 }
 
-async function fetchEnrollments(userId: string): Promise<EnrolledCourseDetail[]> {
+async function fetchEnrollments(userId: string, force = false): Promise<EnrolledCourseDetail[]> {
   const enrollments = await fetchEnrolledCourses(userId);
   return Promise.all(
     enrollments
       .filter((enr: any) => enr.courses)
       .map(async (enr: any) => {
         const c    = enr.courses;
-        const prog = await fetchCourseProgress(userId, String(c.id));
+        // Shared per user+course request; `force` only for pull-to-refresh / Retry.
+        const prog = await fetchCourseProgress(userId, String(c.id), { force });
         // Unknown progress must not be shown as 0%: fail the load so the
         // repository falls back to saved data and flags the error.
-        if (prog.failed) throw new Error(`Progress unavailable for course ${c.id}`);
+        if (prog.failed) throw new CourseProgressUnavailableError(c.id, prog.errorKind);
         return {
           courseId:         String(c.id),
           courseTitle:      c.title,
@@ -163,13 +165,15 @@ export const coursesRepository = {
     userId: string | undefined,
     isOffline: boolean,
     forceRefresh = false,
-    onBackgroundUpdate?: (data: CoursesData) => void
+    onBackgroundUpdate?: (data: CoursesData) => void,
+    /** Pull-to-refresh / Retry only: skip the short shared progress cache too. */
+    forceProgress = false,
   ): Promise<RepositoryResult<CoursesData>> {
     // M-25: captured before any fetch; late writes for another account are dropped.
     const scope = cacheManager.userScope();
     if (isOffline) {
       // Saved data only; flagged so an empty list is not shown as "no courses".
-      return { ...(await coursesRepository.loadFromCache(userId)), error: true };
+      return { ...(await coursesRepository.loadFromCache(userId)), error: true, errorKind: 'network' };
     }
 
     // Cache-first optimization: check public catalog first
@@ -226,7 +230,7 @@ export const coursesRepository = {
 
       let enrollments: EnrolledCourseDetail[] = [];
       if (userId) {
-        enrollments = await fetchEnrollments(userId);
+        enrollments = await fetchEnrollments(userId, forceProgress);
         cacheManager.write(STORAGE_KEYS.CACHED_COURSES_ENROLLMENTS, enrollments, scope);
       }
 
@@ -243,7 +247,7 @@ export const coursesRepository = {
       }
       // Saved data (possibly empty) + error flag: the screen shows an error /
       // retry state instead of "no courses" or 0%.
-      return { ...(await coursesRepository.loadFromCache(userId)), error: true };
+      return { ...(await coursesRepository.loadFromCache(userId)), error: true, errorKind: classifyApiError(err) };
     }
   },
 

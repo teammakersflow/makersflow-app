@@ -14,6 +14,7 @@
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { CACHE_VERSION, decodeCachePayload } from '@/constants/cachePolicy';
+import type { ApiErrorKind } from '@/lib/apiErrorKind';
 import { USER_CACHE_KEYS } from '@/constants/storageKeys';
 
 // ── Public result type ───────────────────────────────────────────────────────
@@ -42,6 +43,8 @@ export interface RepositoryResult<T> {
    * as a genuine empty result: screens show an error/retry state instead.
    */
   error?: boolean;
+  /** What failed (lib/apiErrorKind.ts), so the screen can show the right message. */
+  errorKind?: ApiErrorKind;
   /** ISO 8601 timestamp of when the cache was last written. Null for network responses. */
   updatedAt: string | null;
 }

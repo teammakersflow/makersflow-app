@@ -1,6 +1,7 @@
 import { apiClient } from '@/lib/auth/apiClient';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { cacheManager } from '@/services/cacheManager';
+import { courseRequests } from '@/lib/courseRequests';
 
 export interface CourseModuleItem {
   id: string;
@@ -70,9 +71,14 @@ export async function getCourseModules(courseId: string | number): Promise<Cours
   // M-23 (2026-11-10): network failures no longer turn into an empty course.
   // The last good structure is cached per user + course and used offline. If
   // there is no cached copy, the error is thrown so screens can show an offline state.
+  // GET /modules and GET /lessons take no parameters and return the full
+  // lists, so they are shared by every course and screen for a short window
+  // (lib/courseRequests.ts) instead of being downloaded once per course.
+  // Keyed by the signed-in user: /lessons depends on who is asking.
+  const owner = cacheManager.userScope().owner;
   const settled = await Promise.allSettled([
-    apiClient.get<any>('/modules'),
-    apiClient.get<any>('/lessons'),
+    courseRequests.allModules(owner),
+    courseRequests.allLessons(owner),
   ]);
   if (settled.some((r) => r.status === 'rejected')) {
     const cached = await readCourseStructure(courseId);
@@ -211,7 +217,8 @@ export async function fetchLessonDurations(lessonIds: (string | number)[]): Prom
   if (!lessonIds || lessonIds.length === 0) return durationMap;
 
   try {
-    const response = await apiClient.get<any>('/lessons');
+    // Same shared /lessons list as getCourseModules (one download per window).
+    const response = await courseRequests.allLessons(cacheManager.userScope().owner);
     const rawLessons = Array.isArray(response)
       ? response
       : (Array.isArray(response?.data) ? response.data : []);

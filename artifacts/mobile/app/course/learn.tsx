@@ -37,6 +37,7 @@ import {
   getPendingCompletionLessonIds,
 } from "@/lib/progressStorage";
 import { coursePercentage, isCourseCompleteFromLessons, onProgressChanged } from "@/lib/courseCompletion";
+import { classifyApiError, loadErrorMessage, type ApiErrorKind } from "@/lib/apiErrorKind";
 import { apiRequest } from "@/lib/auth/apiClient";
 import { getEnrollment, isExpired, completeCourse } from "@/services/enrollmentService";
 import { ActivityIndicator } from "react-native";
@@ -106,16 +107,19 @@ export default function LearnScreen() {
   const [pendingCompletionIds, setPendingCompletionIds] = useState<string[]>([]);
   // The last progress request failed: keep what is shown and offer a retry.
   const [progressLoadError, setProgressLoadError] = useState(false);
+  const [progressErrorKind, setProgressErrorKind] = useState<ApiErrorKind | undefined>(undefined);
 
   /**
    * Reloads backend lesson progress. On failure keeps the current progress,
    * flags the error and returns null (never replaces it with "no progress").
    */
-  const reloadProgress = useCallback(async (): Promise<any[] | null> => {
+  const reloadProgress = useCallback(async (opts?: { force?: boolean }): Promise<any[] | null> => {
     if (!user?.id || !courseId) return null;
     const pendingIds = await getPendingCompletionLessonIds(user.id, courseId);
     try {
-      const progressData = await fetchCourseLessonsProgressStrict(user.id, courseId);
+      // Shared request (lib/courseRequests.ts); after a write it is already
+      // invalidated, `force` is only for the Retry button.
+      const progressData = await fetchCourseLessonsProgressStrict(user.id, courseId, opts);
       setLessonsProgress(progressData);
       setProgressLoadError(false);
       const confirmed = new Set(
@@ -126,6 +130,7 @@ export default function LearnScreen() {
     } catch (e) {
       console.warn('[LearnScreen] progress reload failed:', e);
       setProgressLoadError(true);
+      setProgressErrorKind(classifyApiError(e));
       setPendingCompletionIds((prev) => Array.from(new Set([...prev, ...pendingIds])));
       return null;
     }
@@ -1046,13 +1051,13 @@ export default function LearnScreen() {
       )}
       {progressLoadError && (
         <Pressable
-          onPress={() => { reloadProgress(); }}
+          onPress={() => { reloadProgress({ force: true }); }}
           accessibilityRole="button"
           style={[styles.actionButtonContainer, { backgroundColor: colors.card, borderBottomColor: colors.border, flexDirection: "row", alignItems: "center", gap: 8 }]}
         >
           <Ionicons name="cloud-offline-outline" size={16} color={colors.mutedForeground} />
           <Text style={{ flex: 1, color: colors.mutedForeground, fontFamily: "Inter_400Regular", fontSize: 13 }}>
-            Couldn't load your progress. Showing what was last loaded.
+            {loadErrorMessage(progressErrorKind, lessonsProgress.length > 0)}
           </Text>
           <Text style={{ color: "#0B6FAD", fontFamily: "Inter_600SemiBold", fontSize: 13 }}>Retry</Text>
         </Pressable>
