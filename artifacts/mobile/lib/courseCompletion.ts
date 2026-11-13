@@ -6,9 +6,13 @@
  * lesson and every one of its current lessons has a completed lesson_progress
  * row. Opening or partly watching a lesson never completes a course.
  *
- * The backend does not write enrollments.completed_at for students (only the
- * admin PATCH /enrollments/:id can), so completed_at alone must never be the
- * only completion signal in the app. It is still honoured when present.
+ * Status and date are separate (owner decision 2026-11-13, option 1):
+ * - CURRENT status is live: is_completed for the course's current lessons.
+ *   If lessons are added later the course is In Progress again until they
+ *   are completed.
+ * - enrollments.completed_at is the FIRST-completion DATE (stamped by the
+ *   backend once, never overwritten). A non-null completed_at alone never
+ *   means "completed now".
  *
  * The backend's is_completed flag is used whenever it is present, so the app
  * agrees with the backend (and its certificate check). Displayed counts come
@@ -110,7 +114,8 @@ export function isCourseCompleteFromLessons(
 
 /**
  * The date a course was FIRST completed, from the most stable source:
- * 1. enrollments.completed_at (set only by an admin today);
+ * 1. enrollments.completed_at (stamped by the backend at first completion,
+ *    never overwritten; may also be set by an admin);
  * 2. the certificate's issued_at: one certificate per user/course, issued
  *    when the course is first completed and never changed afterwards;
  * 3. the latest last_watched_at among completed lessons: this moves later if
@@ -125,12 +130,13 @@ export function resolveCompletionDate(input: {
   return input.enrollmentCompletedAt || input.certificateIssuedAt || input.lessonCompletedAt || null;
 }
 
-/** True when either the enrollment was stamped complete or the lessons say so. */
-export function isCourseComplete(input: {
-  completedAt?: string | null;
-  isCompleted?: boolean | null;
-}): boolean {
-  return !!input.completedAt || input.isCompleted === true;
+/**
+ * CURRENT completion status: only the live lesson rule (backend is_completed).
+ * Deliberately takes no completed_at: that is the first-completion date and
+ * stays set after an admin adds lessons, while the course is In Progress.
+ */
+export function isCourseComplete(input: { isCompleted?: boolean | null }): boolean {
+  return input.isCompleted === true;
 }
 
 // ── Progress-change signal ──────────────────────────────────────────────────

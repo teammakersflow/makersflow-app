@@ -171,21 +171,19 @@ export default function ProfileScreen() {
             const level = (enr.courses as any)?.level;
             const instructor = undefined;
 
-            if (enr.completed_at) {
-              results.push({ courseId, courseTitle, completedAt: enr.completed_at, level, instructor });
-              continue;
-            }
-
+            // Status is live (current lessons); completed_at alone never means
+            // "completed now" (an admin may have added lessons since).
             const prog = await fetchCourseProgress(user.id, courseId);
             if (prog.isCompleted) {
-              // No student API stamps completed_at, so use the certificate issue
-              // date (fixed at first completion), else when the last lesson
-              // was completed, never the enrollment date.
+              // Date = FIRST completion: enrollments.completed_at (stamped once by
+              // the backend), else the certificate issue date, else when the
+              // last lesson was completed. Never the enrollment date.
               results.push({
                 courseId,
                 courseTitle,
                 completedAt:
                   resolveCompletionDate({
+                    enrollmentCompletedAt: enr.completed_at,
                     certificateIssuedAt: certIssuedAt.get(courseId),
                     lessonCompletedAt: prog.completedAt,
                   }) ?? enr.enrolled_at ?? '',

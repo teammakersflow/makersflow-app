@@ -157,25 +157,17 @@ export default function AchievementsScreen() {
             const level = (enr.courses as any)?.level;
             const instructor = undefined;
 
-            if (enr.completed_at) {
-              results.push({
-                courseId,
-                courseTitle,
-                completedAt: enr.completed_at,
-                level,
-                instructor,
-              });
-              continue;
-            }
-
+            // Status is live (current lessons); completed_at alone never means
+            // "completed now" (an admin may have added lessons since).
             const prog = await fetchCourseProgress(user.id, courseId);
             if (prog.isCompleted) {
               results.push({
                 courseId,
                 courseTitle,
-                // First completion date: certificate issue date (never changes),
-                // else when the last lesson was completed.
+                // FIRST completion date: enrollments.completed_at (stamped once),
+                // else the certificate issue date, else the last lesson date.
                 completedAt: resolveCompletionDate({
+                  enrollmentCompletedAt: enr.completed_at,
                   certificateIssuedAt: certIssuedAt.get(courseId),
                   lessonCompletedAt: prog.completedAt,
                 }),

@@ -318,14 +318,13 @@ export default function CourseDetailScreen() {
   };
 
   const quiz = useMemo(() => QUIZZES.find((q) => q.courseId === course?.id), [course?.id]);
-  // completed_at is never stamped for students (no student API writes it), so
-  // completion also follows the backend lesson rule (lib/courseCompletion.ts).
+  // Current status is live: every CURRENT lesson completed (backend rule).
+  // enrollment.completed_at is only the first-completion date; it stays set
+  // when an admin adds lessons, while the course is In Progress again.
   // `modules` here is the course's flat lesson list.
   const isCourseCompleted = useMemo(
-    () =>
-      !!enrollment?.completed_at ||
-      (isEnrolled && isCourseCompleteFromLessons(lessonsProgress, modules.map((m: any) => m.id))),
-    [enrollment?.completed_at, isEnrolled, lessonsProgress, modules],
+    () => isEnrolled && isCourseCompleteFromLessons(lessonsProgress, modules.map((m: any) => m.id)),
+    [isEnrolled, lessonsProgress, modules],
   );
   const accessExpired = useMemo(() => isExpired(enrollment), [enrollment]);
   const completedModules = useMemo(() => lessonsProgress.filter((p) => p.is_completed).length, [lessonsProgress]);

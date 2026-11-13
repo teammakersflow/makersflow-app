@@ -198,7 +198,7 @@ async function fetchProgress(userId: string): Promise<HomeProgress> {
           courseId: cId,
           progress: prog.percentage,
           completedAt: enr.completed_at || null,
-          isCompleted: isCourseComplete({ completedAt: enr.completed_at, isCompleted: prog.isCompleted }),
+          isCompleted: isCourseComplete({ isCompleted: prog.isCompleted }),
         };
       })
   );

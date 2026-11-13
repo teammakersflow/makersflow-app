@@ -421,12 +421,14 @@ export default function HomeScreen() {
     }
   };
 
-  // enrollments.completed_at is never set for students, so it cannot be the
-  // only signal; isCompleted follows the backend lesson rule.
   // Failed with nothing loaded yet: show "–", not zeros that look real.
   const statsUnknown = progressError && !hasProgressData;
+  // Current status is live (isCompleted, backend lesson rule). completedAt is
+  // only the first-completion date: after an admin adds lessons it stays set
+  // while the course is In Progress. Entries cached by an older build have no
+  // isCompleted and fall back to 100%.
   const completedCount = enrolledCourses.filter((p) =>
-    typeof p.isCompleted === "boolean" ? p.isCompleted : p.completedAt != null,
+    typeof p.isCompleted === "boolean" ? p.isCompleted : p.progress === 100,
   ).length;
   const avgProgress =
     enrolledCourses.length > 0

@@ -145,7 +145,7 @@ async function fetchEnrollments(userId: string): Promise<EnrolledCourseDetail[]>
           completedModules: prog.completed,
           lastAccessedAt:   enr.enrolled_at || new Date().toISOString(),
           timeSpent:        0,
-          isCompleted:      isCourseComplete({ completedAt: enr.completed_at, isCompleted: prog.isCompleted }),
+          isCompleted:      isCourseComplete({ isCompleted: prog.isCompleted }),
         };
       })
   );
