@@ -30,8 +30,13 @@ import { useAuth } from "@/context/AuthContext";
 import { useFavorites } from "@/context/FavoritesContext";
 import { useProgress } from "@/context/ProgressContext";
 import { getCourseById, getCourseModules } from "@/services/courseDataProvider";
-import { markLessonComplete, upsertLessonProgress, fetchCourseLessonsProgress } from "@/lib/progressStorage";
-import { coursePercentage, isCourseCompleteFromLessons } from "@/lib/courseCompletion";
+import {
+  markLessonComplete,
+  upsertLessonProgress,
+  fetchCourseLessonsProgressStrict,
+  getPendingCompletionLessonIds,
+} from "@/lib/progressStorage";
+import { coursePercentage, isCourseCompleteFromLessons, onProgressChanged } from "@/lib/courseCompletion";
 import { apiRequest } from "@/lib/auth/apiClient";
 import { getEnrollment, isExpired, completeCourse } from "@/services/enrollmentService";
 import { ActivityIndicator } from "react-native";
@@ -43,6 +48,16 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** Module-level so memoised callbacks can use it safely. */
+function notifyCompletionQueued() {
+  const message = "Saved on this device. It will sync when you're back online.";
+  if (Platform.OS === 'android') {
+    ToastAndroid.show(message, ToastAndroid.SHORT);
+  } else {
+    Alert.alert('', message);
+  }
 }
 
 export default function LearnScreen() {
@@ -86,6 +101,53 @@ export default function LearnScreen() {
   const [isDownloading, setIsDownloading] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState<number | null>(null);
   const [isMarkingComplete, setIsMarkingComplete] = useState(false);
+  // Manual completions saved in the outbox but not yet confirmed by the
+  // backend. Shown as "waiting to sync"; never counted toward course completion.
+  const [pendingCompletionIds, setPendingCompletionIds] = useState<string[]>([]);
+  // The last progress request failed: keep what is shown and offer a retry.
+  const [progressLoadError, setProgressLoadError] = useState(false);
+
+  /**
+   * Reloads backend lesson progress. On failure keeps the current progress,
+   * flags the error and returns null (never replaces it with "no progress").
+   */
+  const reloadProgress = useCallback(async (): Promise<any[] | null> => {
+    if (!user?.id || !courseId) return null;
+    const pendingIds = await getPendingCompletionLessonIds(user.id, courseId);
+    try {
+      const progressData = await fetchCourseLessonsProgressStrict(user.id, courseId);
+      setLessonsProgress(progressData);
+      setProgressLoadError(false);
+      const confirmed = new Set(
+        progressData.filter((p) => p.is_completed).map((p) => String(p.lesson_id)),
+      );
+      setPendingCompletionIds(pendingIds.filter((id) => !confirmed.has(id)));
+      return progressData;
+    } catch (e) {
+      console.warn('[LearnScreen] progress reload failed:', e);
+      setProgressLoadError(true);
+      setPendingCompletionIds((prev) => Array.from(new Set([...prev, ...pendingIds])));
+      return null;
+    }
+  }, [user?.id, courseId]);
+
+  // While a completion is waiting to sync, reload progress when the outbox
+  // flushes (reconnect / foreground), so the lesson flips to confirmed.
+  // Ignored otherwise, so playback updates do not trigger extra requests.
+  const hasPendingRef = useRef(false);
+  hasPendingRef.current = pendingCompletionIds.length > 0;
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const off = onProgressChanged(() => {
+      if (!hasPendingRef.current) return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => { reloadProgress(); }, 500);
+    });
+    return () => {
+      off();
+      if (timer) clearTimeout(timer);
+    };
+  }, [reloadProgress]);
 
   // Signed video URL fetched from NestJS GET /lessons/:id/video.
   // Kept in runtime state only — never persisted; expires after 300 s.
@@ -236,8 +298,9 @@ export default function LearnScreen() {
           }
 
           if (user?.id) {
-            const progressData = await fetchCourseLessonsProgress(user.id, courseId);
-            setLessonsProgress(progressData);
+            // A failed request must not look like "no progress" (0%, every
+            // lesson but the first locked): flag it and offer a retry.
+            await reloadProgress();
 
             const enrollData = await getEnrollment(user.id, courseId);
             setEnrollment(enrollData);
@@ -404,15 +467,16 @@ export default function LearnScreen() {
 
   const handleVideoComplete = useCallback(async () => {
     if (!user?.id || !courseId || !activeModule?.id) return;
-    await markLessonComplete(user.id, Number(courseId), Number(activeModule.id));
-    await completeModule(String(Number(courseId)), String(Number(activeModule.id)));
-    let updatedProgress: any[] = [];
-    try {
-      updatedProgress = await fetchCourseLessonsProgress(user.id, Number(courseId));
-      setLessonsProgress(updatedProgress);
-    } catch (e) {
-      console.error(e);
+    const result = await markLessonComplete(user.id, Number(courseId), Number(activeModule.id));
+    if (result === 'queued') {
+      // Not confirmed: show it as waiting to sync, never as a finished course.
+      setPendingCompletionIds((prev) => Array.from(new Set([...prev, String(activeModule.id)])));
+      notifyCompletionQueued();
+      return;
     }
+    await completeModule(String(Number(courseId)), String(Number(activeModule.id)));
+    // null = the reload failed: progress is unknown, so skip the course-completion check.
+    const updatedProgress = (await reloadProgress()) ?? [];
     await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
 
     const completedCount = updatedProgress.filter((p) => p.is_completed).length;
@@ -455,7 +519,7 @@ export default function LearnScreen() {
       }
     }
     setShowCompleteModal(true);
-  }, [user?.id, courseId, activeModule?.id, totalLessons, enrollment?.completed_at, course?.title, lessons]);
+  }, [user?.id, courseId, activeModule?.id, totalLessons, enrollment?.completed_at, course?.title, lessons, reloadProgress]);
 
   useEffect(() => {
     if (!user?.id || !courseId || isLoading) return;
@@ -612,16 +676,14 @@ export default function LearnScreen() {
     setStartOverLessonId(activeModuleId);
     setShowResumeModal(false);
     await upsertLessonProgress(user.id, Number(courseId), Number(activeModule.id), 0, 0);
-    const progressData = await fetchCourseLessonsProgress(user.id, Number(courseId));
-    setLessonsProgress(progressData);
+    await reloadProgress(); // keeps current progress if the reload fails
   };
 
   const handleReplayLesson = async () => {
     if (!user?.id || !courseId || !activeModule?.id) return;
     setShowCompleteModal(false);
     await upsertLessonProgress(user.id, Number(courseId), Number(activeModule.id), 0, 0);
-    const progressData = await fetchCourseLessonsProgress(user.id, Number(courseId));
-    setLessonsProgress(progressData);
+    await reloadProgress(); // keeps current progress if the reload fails
   };
 
   const handleNextLesson = () => {
@@ -651,15 +713,16 @@ export default function LearnScreen() {
     if (isMarkingComplete) return;
     setIsMarkingComplete(true);
     try {
-      await markLessonComplete(user.id, courseId, activeModule.id);
-      await completeModule(courseId, activeModule.id);
-      let updatedProgress: any[] = [];
-      try {
-        updatedProgress = await fetchCourseLessonsProgress(user.id, courseId);
-        setLessonsProgress(updatedProgress);
-      } catch (e) {
-        console.error(e);
+      const result = await markLessonComplete(user.id, courseId, activeModule.id);
+      if (result === 'queued') {
+        // Not confirmed: show it as waiting to sync, never as a finished course.
+        setPendingCompletionIds((prev) => Array.from(new Set([...prev, String(activeModule.id)])));
+        notifyCompletionQueued();
+        return;
       }
+      await completeModule(courseId, activeModule.id);
+      // null = the reload failed: progress is unknown, so skip the course-completion check.
+      const updatedProgress = (await reloadProgress()) ?? [];
       await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
 
       const completedCount = updatedProgress.filter((p) => p.is_completed).length;
@@ -738,14 +801,22 @@ export default function LearnScreen() {
   const getModuleState = (module: any, index: number) => {
     const modProgress = lessonsProgress.find((p) => String(p.lesson_id) === module.id);
     const isCompleted = modProgress?.is_completed || false;
+    // Completed on this device, waiting to sync (not confirmed by the backend).
+    const isPendingSync = !isCompleted && pendingCompletionIds.includes(String(module.id));
     const isCurrent = activeModuleId === module.id;
 
     const previousModule = lessons[index - 1];
     const prevProgress = previousModule ? lessonsProgress.find((p) => String(p.lesson_id) === previousModule.id) : null;
-    const canAccess = index === 0 || !previousModule || prevProgress?.is_completed;
+    // A completion waiting to sync still unlocks the next lesson on this
+    // device, so an offline learner can continue; it never completes the course.
+    const canAccess =
+      index === 0 ||
+      !previousModule ||
+      prevProgress?.is_completed ||
+      pendingCompletionIds.includes(String(previousModule.id));
     const isLocked = !canAccess;
 
-    return { isCompleted, isCurrent, isLocked };
+    return { isCompleted, isPendingSync, isCurrent, isLocked };
   };
 
   const topPad = Platform.OS === "web" ? 67 : insets.top;
@@ -973,11 +1044,38 @@ export default function LearnScreen() {
           )}
         </View>
       )}
+      {progressLoadError && (
+        <Pressable
+          onPress={() => { reloadProgress(); }}
+          accessibilityRole="button"
+          style={[styles.actionButtonContainer, { backgroundColor: colors.card, borderBottomColor: colors.border, flexDirection: "row", alignItems: "center", gap: 8 }]}
+        >
+          <Ionicons name="cloud-offline-outline" size={16} color={colors.mutedForeground} />
+          <Text style={{ flex: 1, color: colors.mutedForeground, fontFamily: "Inter_400Regular", fontSize: 13 }}>
+            Couldn't load your progress. Showing what was last loaded.
+          </Text>
+          <Text style={{ color: "#0B6FAD", fontFamily: "Inter_600SemiBold", fontSize: 13 }}>Retry</Text>
+        </Pressable>
+      )}
       {/* Mark Complete Button - Secondary Aqua / Pill h48 */}
       {(() => {
         const isAlreadyComplete = !!(lessonsProgress.find(
           (p) => String(p.lesson_id) === String(activeModule?.id)
         )?.is_completed);
+        const isWaitingToSync =
+          !isAlreadyComplete && !!activeModule && pendingCompletionIds.includes(String(activeModule.id));
+        if (isWaitingToSync) {
+          return (
+            <View style={[styles.actionButtonContainer, { backgroundColor: colors.card, borderBottomColor: colors.border }]}>
+              <View style={[styles.markCompleteBtn, { backgroundColor: colors.muted }]}>
+                <Ionicons name="cloud-upload-outline" size={16} color={colors.mutedForeground} />
+                <Text style={[styles.markCompleteBtnText, { color: colors.mutedForeground }]}>
+                  Completed · waiting to sync
+                </Text>
+              </View>
+            </View>
+          );
+        }
         return isAlreadyComplete ? (
           <View style={[styles.actionButtonContainer, { backgroundColor: colors.card, borderBottomColor: colors.border }]}>
             <View style={[styles.markCompleteBtn, { backgroundColor: '#DCF7F4' }]}>
@@ -1107,7 +1205,7 @@ export default function LearnScreen() {
         ) : (
           <View style={styles.moduleList}>
             {lessons.map((mod, idx) => {
-              const { isCompleted, isCurrent, isLocked } = getModuleState(mod, idx);
+              const { isCompleted, isPendingSync, isCurrent, isLocked } = getModuleState(mod, idx);
               const modProgress = lessonsProgress.find((p) => String(p.lesson_id) === String(mod.id));
               const watchedPercentage = modProgress?.watch_percentage || 0;
 
@@ -1198,11 +1296,12 @@ export default function LearnScreen() {
                   </Pressable>
 
                   <Ionicons
-                    name={isCompleted ? "checkmark-circle" : isCurrent ? "play-circle" : isLocked ? "lock-closed" : "ellipse-outline"}
+                    name={isCompleted ? "checkmark-circle" : isPendingSync ? "cloud-upload-outline" : isCurrent ? "play-circle" : isLocked ? "lock-closed" : "ellipse-outline"}
                     size={20}
                     color={
-                      isCompleted ? "#17E5D3" : isCurrent ? "#0B6FAD" : isLocked ? "#9CA3AF" : "#D6E9F2"
+                      isCompleted ? "#17E5D3" : isPendingSync ? "#9CA3AF" : isCurrent ? "#0B6FAD" : isLocked ? "#9CA3AF" : "#D6E9F2"
                     }
+                    accessibilityLabel={isPendingSync ? "Completed, waiting to sync" : undefined}
                   />
                 </Pressable>
               );

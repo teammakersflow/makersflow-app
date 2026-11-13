@@ -31,6 +31,7 @@ import { ProgressCalculator } from "@/lib/progressCalculator";
 import { HomeSkeleton } from "@/components/SkeletonLoader";
 import { fetchCourseProgress, fetchCourseLessonsProgress } from "@/lib/progressStorage";
 import { getProgressVersion, isCourseComplete } from "@/lib/courseCompletion";
+import { LoadErrorNotice } from "@/components/LoadErrorNotice";
 
 function formatTotalTime(totalMinutes: number): string {
   const minutes = Math.round(totalMinutes);
@@ -81,6 +82,9 @@ export default function ProgressScreen() {
   const [isLoadingLeaderboard, setIsLoadingLeaderboard] = useState(false);
 
   const loadedProgressVersion = useRef(getProgressVersion());
+  // The last load failed / at least one load succeeded.
+  const [loadError, setLoadError] = useState(false);
+  const [hasLoaded, setHasLoaded] = useState(false);
 
   const loadStatsAndCourses = useCallback(async (isRefreshing = false) => {
     if (!user?.id) {
@@ -126,6 +130,8 @@ export default function ProgressScreen() {
 
         // Use same fetchCourseProgress function
         const prog = await fetchCourseProgress(user.id, courseId);
+        // Unknown progress is not 0%: fail this load (previous stats stay).
+        if (prog.failed) throw new Error(`Progress unavailable for course ${courseId}`);
         const courseProgPct = prog.percentage;
 
         try {
@@ -261,6 +267,8 @@ export default function ProgressScreen() {
       recentlyCompleted.sort((a: any, b: any) => new Date(b.completedAt).getTime() - new Date(a.completedAt).getTime());
       const topRecentlyCompleted = recentlyCompleted.slice(0, 10);
 
+      setLoadError(false);
+      setHasLoaded(true);
       setStats({
         totalCoursesEnrolled,
         coursesCompleted: completedCoursesCount,
@@ -299,6 +307,8 @@ export default function ProgressScreen() {
 
     } catch (err) {
       console.error('[Progress] Error loading stats & courses:', err);
+      // Keep the stats already shown; never present a failure as "no courses".
+      setLoadError(true);
     } finally {
       setIsLoadingCourses(false);
     }
@@ -423,7 +433,22 @@ export default function ProgressScreen() {
         })}
       </View>
 
-      {stats.totalCoursesEnrolled === 0 ? (
+      {loadError && (
+        <View style={{ marginHorizontal: 20, marginBottom: 12 }}>
+          <LoadErrorNotice
+            variant={hasLoaded ? "banner" : "card"}
+            message={
+              hasLoaded
+                ? "Couldn't refresh your progress. Showing what was last loaded."
+                : "We couldn't load your progress. Check your connection and try again."
+            }
+            onRetry={onRefresh}
+            retrying={refreshing}
+          />
+        </View>
+      )}
+
+      {loadError && !hasLoaded ? null : stats.totalCoursesEnrolled === 0 ? (
         <View style={styles.emptyState}>
           <View style={[styles.emptyIcon, { backgroundColor: colors.accent }]}>
             <Ionicons name="stats-chart" size={48} color={colors.accentForeground} />

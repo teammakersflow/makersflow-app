@@ -12,6 +12,7 @@ import { coursesRepository } from "@/repositories/coursesRepository";
 import { useNetwork } from "@/context/NetworkContext";
 import { useTabSwipe } from "@/hooks/useTabSwipe";
 import { getProgressVersion } from "@/lib/courseCompletion";
+import { LoadErrorNotice } from "@/components/LoadErrorNotice";
 
 export default function CoursesScreen() {
   const colors = useColors();
@@ -27,6 +28,8 @@ export default function CoursesScreen() {
   const [enrolledCourses, setEnrolledCourses] = useState<any[]>([]);
   const [browseMoreCourses, setBrowseMoreCourses] = useState<any[]>([]);
   const [refreshing, setRefreshing] = useState(false);
+  // The last load failed: what is shown (if anything) is saved data.
+  const [loadError, setLoadError] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState("All");
 
   // Debounce ref — prevents rapid reconnect events from triggering repeated refreshes
@@ -66,6 +69,7 @@ export default function CoursesScreen() {
 
           setEnrolledCourses(bgData.enrollments);
           setBrowseMoreCourses(bgData.catalog);
+          setLoadError(false);
         }
       );
 
@@ -74,12 +78,21 @@ export default function CoursesScreen() {
         requestUserId !== previousUserId.current
       ) return;
 
-      setEnrolledCourses(result.data.enrollments);
-      setBrowseMoreCourses(result.data.catalog);
+      if (result.error) {
+        // Failed request: never replace what is shown with an empty list.
+        setLoadError(true);
+        setEnrolledCourses((prev) => (result.data.enrollments.length > 0 || prev.length === 0 ? result.data.enrollments : prev));
+        setBrowseMoreCourses((prev) => (result.data.catalog.length > 0 || prev.length === 0 ? result.data.catalog : prev));
+      } else {
+        setLoadError(false);
+        setEnrolledCourses(result.data.enrollments);
+        setBrowseMoreCourses(result.data.catalog);
+      }
       hasLoadedOnce.current = true;
     } catch (err) {
       if (requestId === requestGenerationRef.current) {
         console.error('[CoursesScreen] loadData error:', err);
+        setLoadError(true);
       }
     } finally {
       if (requestId === requestGenerationRef.current) {
@@ -246,6 +259,14 @@ export default function CoursesScreen() {
                   <Text style={styles.guestBtnText}>Sign In</Text>
                 </Pressable>
               </View>
+            ) : totalEnrolled === 0 && loadError ? (
+              // A failed request is not "no enrolled courses".
+              <LoadErrorNotice
+                variant="card"
+                message="We couldn't load your courses. Check your connection and try again."
+                onRetry={onRefresh}
+                retrying={refreshing}
+              />
             ) : totalEnrolled === 0 ? (
               <View style={[styles.emptyEnrolledCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
                 <Ionicons name="book" size={32} color={colors.mutedForeground} style={{ opacity: 0.5, marginBottom: 8 }} />
@@ -255,6 +276,15 @@ export default function CoursesScreen() {
               </View>
             ) : (
               <>
+                {loadError && (
+                  <View style={{ marginBottom: 12 }}>
+                    <LoadErrorNotice
+                      message="Couldn't refresh your courses. Showing what was last loaded."
+                      onRetry={onRefresh}
+                      retrying={refreshing}
+                    />
+                  </View>
+                )}
                 {/* IN PROGRESS SECTION */}
                 <View style={styles.section}>
                   <Pressable

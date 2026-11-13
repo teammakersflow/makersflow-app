@@ -16,7 +16,9 @@ export function WatchlistCard({ item }: WatchlistCardProps) {
   const handlePress = () => {
     router.push({
       pathname: "/course/learn",
-      params: { courseId: item.courseId, moduleId: item.moduleId },
+      // Opens the course at the lesson to resume; the learn screen offers to
+      // continue from the saved position.
+      params: { courseId: item.courseId, moduleId: item.moduleId, lessonId: item.lessonId ?? item.moduleId },
     });
   };
 

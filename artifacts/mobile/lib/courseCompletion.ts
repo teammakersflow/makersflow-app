@@ -108,6 +108,23 @@ export function isCourseCompleteFromLessons(
   return lessonIds.every((id) => done.has(String(id)));
 }
 
+/**
+ * The date a course was FIRST completed, from the most stable source:
+ * 1. enrollments.completed_at (set only by an admin today);
+ * 2. the certificate's issued_at: one certificate per user/course, issued
+ *    when the course is first completed and never changed afterwards;
+ * 3. the latest last_watched_at among completed lessons: this moves later if
+ *    the learner rewatches, so it is only a fallback for courses without a
+ *    certificate yet.
+ */
+export function resolveCompletionDate(input: {
+  enrollmentCompletedAt?: string | null;
+  certificateIssuedAt?: string | null;
+  lessonCompletedAt?: string | null;
+}): string | null {
+  return input.enrollmentCompletedAt || input.certificateIssuedAt || input.lessonCompletedAt || null;
+}
+
 /** True when either the enrollment was stamped complete or the lessons say so. */
 export function isCourseComplete(input: {
   completedAt?: string | null;
@@ -122,9 +139,29 @@ export function isCourseComplete(input: {
 // focus and reload only when something changed, so a finished course shows as
 // finished without a pull-to-refresh or restart.
 let progressVersion = 0;
+const progressListeners = new Set<() => void>();
 
 export function markProgressChanged(): void {
   progressVersion += 1;
+  for (const listener of Array.from(progressListeners)) {
+    try {
+      listener();
+    } catch {
+      // a listener must never break the caller
+    }
+  }
+}
+
+/**
+ * Called on every markProgressChanged(). For screens that stay focused while
+ * progress syncs (the learn screen waiting for a queued completion). Returns
+ * an unsubscribe function.
+ */
+export function onProgressChanged(listener: () => void): () => void {
+  progressListeners.add(listener);
+  return () => {
+    progressListeners.delete(listener);
+  };
 }
 
 export function getProgressVersion(): number {

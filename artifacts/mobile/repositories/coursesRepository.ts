@@ -129,6 +129,9 @@ async function fetchEnrollments(userId: string): Promise<EnrolledCourseDetail[]>
       .map(async (enr: any) => {
         const c    = enr.courses;
         const prog = await fetchCourseProgress(userId, String(c.id));
+        // Unknown progress must not be shown as 0%: fail the load so the
+        // repository falls back to saved data and flags the error.
+        if (prog.failed) throw new Error(`Progress unavailable for course ${c.id}`);
         return {
           courseId:         String(c.id),
           courseTitle:      c.title,
@@ -165,7 +168,8 @@ export const coursesRepository = {
     // M-25: captured before any fetch; late writes for another account are dropped.
     const scope = cacheManager.userScope();
     if (isOffline) {
-      return coursesRepository.loadFromCache(userId);
+      // Saved data only; flagged so an empty list is not shown as "no courses".
+      return { ...(await coursesRepository.loadFromCache(userId)), error: true };
     }
 
     // Cache-first optimization: check public catalog first
@@ -175,15 +179,17 @@ export const coursesRepository = {
           STORAGE_KEYS.CACHED_COURSES_CATALOG,
           CACHE_POLICY.COURSES_CATALOG_TTL_MS
         );
+        const enrollmentsResult = userId && catalogResult && !catalogResult.stale
+          ? await cacheManager.readWithMeta<EnrolledCourseDetail[]>(
+              STORAGE_KEYS.CACHED_COURSES_ENROLLMENTS,
+              CACHE_POLICY.COURSES_ENROLLMENTS_TTL_MS
+            )
+          : null;
 
-        if (catalogResult && !catalogResult.stale) {
-          const enrollmentsResult = userId
-            ? await cacheManager.readWithMeta<EnrolledCourseDetail[]>(
-                STORAGE_KEYS.CACHED_COURSES_ENROLLMENTS,
-                CACHE_POLICY.COURSES_ENROLLMENTS_TTL_MS
-              )
-            : null;
-
+        // A signed-in user with no saved enrollments (e.g. just invalidated
+        // after a lesson/enrollment change) must not be shown an empty list
+        // while the real one loads: fetch from the network instead.
+        if (catalogResult && !catalogResult.stale && (!userId || enrollmentsResult)) {
           const cachedEnrollments = enrollmentsResult?.data ?? [];
           const enrolledIds = new Set(cachedEnrollments.map((e) => e.courseId));
           const cachedData: CoursesData = {
@@ -235,7 +241,9 @@ export const coursesRepository = {
       } else {
         console.error('[coursesRepo] Unexpected fetch error:', err);
       }
-      return coursesRepository.loadFromCache(userId);
+      // Saved data (possibly empty) + error flag: the screen shows an error /
+      // retry state instead of "no courses" or 0%.
+      return { ...(await coursesRepository.loadFromCache(userId)), error: true };
     }
   },
 

@@ -178,6 +178,8 @@ async function fetchProgress(userId: string): Promise<HomeProgress> {
       .map(async (enr: any) => {
         const cId = String(enr.courses.id);
         const prog = await fetchCourseProgress(userId, cId);
+        // Unknown progress must not be shown (or cached) as 0%.
+        if (prog.failed) throw new Error(`Progress unavailable for course ${cId}`);
         try {
           const lessons = await fetchCourseLessonsProgress(userId, cId);
           lessons.forEach((lp: any) => {
@@ -272,7 +274,8 @@ export const homeRepository = {
     // M-25: captured before any fetch; late writes for another account are dropped.
     const scope = cacheManager.userScope();
     if (isOffline) {
-      return homeRepository.loadFromCache(userId);
+      // Saved data only; flagged so missing progress is not shown as zeros.
+      return { ...(await homeRepository.loadFromCache(userId)), error: true };
     }
 
     // Cache-first optimization: check public cache first
@@ -362,17 +365,30 @@ export const homeRepository = {
 
       let progress        = EMPTY_PROGRESS;
       let unreadNotifCount = 0;
+      let progressFailed = false;
 
       if (userId) {
-        [progress, unreadNotifCount] = await Promise.all([
-          fetchProgress(userId).catch(() => EMPTY_PROGRESS),
+        let fetched: HomeProgress | null;
+        [fetched, unreadNotifCount] = await Promise.all([
+          fetchProgress(userId).catch(() => null),
           fetchNotificationCount(userId).catch(() => 0),
         ]);
-        cacheManager.write(STORAGE_KEYS.CACHED_HOME_PROGRESS, progress, scope);
+        if (fetched) {
+          progress = fetched;
+          cacheManager.write(STORAGE_KEYS.CACHED_HOME_PROGRESS, progress, scope);
+        } else {
+          // Failed: keep the saved progress (never overwrite it with zeros)
+          // and flag the error so the screen can offer a retry.
+          progressFailed = true;
+          progress =
+            (await cacheManager
+              .read<HomeProgress>(STORAGE_KEYS.CACHED_HOME_PROGRESS, CACHE_POLICY.HOME_PROGRESS_TTL_MS)
+              .catch(() => null)) ?? EMPTY_PROGRESS;
+        }
         cacheManager.write(STORAGE_KEYS.CACHED_HOME_NOTIFICATIONS, unreadNotifCount, scope);
       }
 
-      return networkResult({
+      const result = networkResult({
         promotions,
         courses: courseResult.courses,
         popularCourses: courseResult.popularCourses,
@@ -380,13 +396,15 @@ export const homeRepository = {
         progress,
         unreadNotifCount,
       });
+      return progressFailed ? { ...result, error: true } : result;
     } catch (err: any) {
       if (isNetworkError(err)) {
         console.warn('[homeRepo] Network error — falling back to cache');
       } else {
         console.error('[homeRepo] Unexpected fetch error:', err);
       }
-      return homeRepository.loadFromCache(userId);
+      // Saved data only; flagged so missing progress is not shown as zeros.
+      return { ...(await homeRepository.loadFromCache(userId)), error: true };
     }
   },
 

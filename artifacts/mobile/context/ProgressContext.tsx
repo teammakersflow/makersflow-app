@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState } from "react";
+import React, { createContext, useContext, useEffect, useRef, useState } from "react";
 import { useAuth } from "./AuthContext";
 import {
   ModuleProgress,
@@ -8,8 +8,52 @@ import {
   WatchlistItem,
   fetchRemoteProgress,
 } from "@/lib/progressStorage";
-import { ProgressCalculator } from "@/lib/progressCalculator";
 import { markProgressChanged } from "@/lib/courseCompletion";
+import { buildContinueLearning, ResumeCourseInput } from "@/lib/continueLearning";
+
+const DEFAULT_COURSE_THUMBNAIL = require("@/assets/images/courses/course_robotics.webp");
+
+/** Continue Learning cards from the per-course resume inputs (lib/continueLearning.ts). */
+function buildWatchlist(progress: UserCourseProgress[]): WatchlistItem[] {
+  const inputs = progress
+    .map((p) => p.continueInput)
+    .filter((c): c is ResumeCourseInput => !!c);
+  return buildContinueLearning(inputs).map((e) => ({
+    courseId: e.courseId,
+    moduleId: e.lessonId,
+    lessonId: e.lessonId,
+    courseTitle: e.courseTitle,
+    moduleTitle: e.lessonTitle,
+    courseThumbnail: e.thumbnailUrl ? { uri: e.thumbnailUrl } : DEFAULT_COURSE_THUMBNAIL,
+    lastWatchedAt: e.lastActivityAt,
+    videoProgress: {
+      videoUrl: "",
+      currentTime: e.currentTimeSecs,
+      duration: 0,
+      watchedPercentage: e.watchPercentage,
+      isCompleted: false,
+      lastWatchedAt: e.lastActivityAt,
+    },
+    courseProgress: e.coursePercentage,
+  }));
+}
+
+/**
+ * Saved cards may hold a bundled-image id from another build; use the
+ * current default artwork for anything that is not a remote URL.
+ */
+function normalizeWatchlist(items: WatchlistItem[]): WatchlistItem[] {
+  const seen = new Set<string>();
+  return items
+    .filter((i) => i && i.courseId && !seen.has(i.courseId) && (seen.add(i.courseId), true))
+    .map((i) => ({
+      ...i,
+      courseThumbnail:
+        i.courseThumbnail && typeof i.courseThumbnail === "object" && i.courseThumbnail.uri
+          ? i.courseThumbnail
+          : DEFAULT_COURSE_THUMBNAIL,
+    }));
+}
 import * as courseDataProvider from "@/services/courseDataProvider";
 import { homeRepository } from "@/repositories/homeRepository";
 import { coursesRepository } from "@/repositories/coursesRepository";
@@ -18,6 +62,8 @@ interface ProgressContextType {
   courseProgress: Map<string, UserCourseProgress>;
   watchlist: WatchlistItem[];
   isLoading: boolean;
+  /** The last progress load failed; data shown is from saved copies (if any). */
+  progressLoadFailed: boolean;
   getCourseProgress: (courseId: string) => UserCourseProgress | null;
   getModuleProgress: (courseId: string, moduleId: string) => ModuleProgress | null;
   updateVideoProgress: (
@@ -42,14 +88,20 @@ export function ProgressProvider({ children }: { children: React.ReactNode }) {
   );
   const [watchlist, setWatchlist] = useState<WatchlistItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  // The last progress load failed (offline / API error): what is shown comes
+  // from saved data. Screens use it to show an error/retry state.
+  const [progressLoadFailed, setProgressLoadFailed] = useState(false);
+  const hydratedForUser = useRef<string | null>(null);
 
   // Load all progress on mount or user change
   useEffect(() => {
     if (user?.id) {
       loadAllProgress();
     } else {
+      hydratedForUser.current = null;
       setCourseProgress(new Map());
       setWatchlist([]);
+      setProgressLoadFailed(false);
       setIsLoading(false);
     }
   }, [user?.id]);
@@ -57,10 +109,18 @@ export function ProgressProvider({ children }: { children: React.ReactNode }) {
   async function loadAllProgress() {
     if (!user?.id) return;
 
+    // After an app restart, show the saved Continue Learning cards right away
+    // while the backend data loads.
+    if (hydratedForUser.current !== user.id) {
+      hydratedForUser.current = user.id;
+      const saved = await ProgressStorage.loadWatchlist(user.id).catch(() => []);
+      if (saved.length > 0) setWatchlist(normalizeWatchlist(saved));
+    }
+
     setIsLoading(true);
     try {
       let allProgress = await fetchRemoteProgress(user.id);
-      
+
       // Save to local storage for offline use
       for (const p of allProgress) {
         await ProgressStorage.saveCourseProgress(p);
@@ -70,19 +130,27 @@ export function ProgressProvider({ children }: { children: React.ReactNode }) {
       allProgress.forEach((p) => progressMap.set(p.courseId, p));
       setCourseProgress(progressMap);
 
-      const loadedWatchlist = await ProgressStorage.loadWatchlist(user.id);
-      const sortedWatchlist = [...loadedWatchlist].sort(
-        (a, b) => new Date(b.lastWatchedAt || 0).getTime() - new Date(a.lastWatchedAt || 0).getTime()
-      );
-      setWatchlist(sortedWatchlist);
+      // Continue Learning is rebuilt from scratch on every load (no stale or
+      // duplicate entries; completed courses drop out) and saved for restarts.
+      const rebuilt = buildWatchlist(allProgress);
+      setWatchlist(rebuilt);
+      await ProgressStorage.saveWatchlist(user.id, rebuilt);
+      setProgressLoadFailed(false);
     } catch (error) {
       console.error("Failed to load progress:", error);
-      // Fallback to local storage on error (e.g. offline)
+      setProgressLoadFailed(true);
+      // Fallback to local storage on error (e.g. offline). Keep what is
+      // already shown rather than replacing it with nothing.
       try {
         const localProgress = await ProgressStorage.loadAllCourseProgress(user.id);
-        const progressMap = new Map<string, UserCourseProgress>();
-        localProgress.forEach((p) => progressMap.set(p.courseId, p));
-        setCourseProgress(progressMap);
+        if (localProgress.length > 0) {
+          const progressMap = new Map<string, UserCourseProgress>();
+          localProgress.forEach((p) => progressMap.set(p.courseId, p));
+          setCourseProgress(progressMap);
+        }
+        const fromSaved = buildWatchlist(localProgress);
+        const savedWatchlist = fromSaved.length > 0 ? fromSaved : await ProgressStorage.loadWatchlist(user.id);
+        if (savedWatchlist.length > 0) setWatchlist(normalizeWatchlist(savedWatchlist));
       } catch (localError) {
         console.error("Failed to load local progress fallback:", localError);
       }
@@ -171,71 +239,13 @@ export function ProgressProvider({ children }: { children: React.ReactNode }) {
     await invalidateRepositories();
   }
 
-  async function updateWatchlist(
-    courseId: string,
-    moduleId: string,
-    progress: UserCourseProgress
-  ): Promise<void> {
-    if (!user?.id) return;
-
-    const course = await courseDataProvider.getCourseById(courseId);
-    if (!course) return;
-    const modules = await courseDataProvider.getCourseModules(courseId);
-    const module = modules.find((m: any) => m.id === moduleId);
-    if (!module) return;
-
-    const moduleProgress = progress.modules[moduleId];
-    if (!moduleProgress) return;
-
-    const shouldShow = ProgressCalculator.shouldShowInContinueWatching(
-      progress.progress,
-      moduleProgress.isStarted
-    );
-
-    let updatedWatchlist = [...watchlist];
-
-    if (shouldShow && !moduleProgress.isCompleted) {
-      const existingIndex = updatedWatchlist.findIndex(
-        (item) => item.courseId === courseId
-      );
-
-      const watchlistItem: WatchlistItem = {
-        courseId,
-        moduleId,
-        courseTitle: course.title,
-        moduleTitle: module.title,
-        courseThumbnail: course.thumbnail_url ? { uri: course.thumbnail_url } : require('@/assets/images/courses/course_robotics.webp'),
-        lastWatchedAt: moduleProgress.lastAccessedAt,
-        videoProgress: moduleProgress.videoProgress,
-        courseProgress: progress.progress,
-      };
-
-      if (existingIndex >= 0) {
-        updatedWatchlist[existingIndex] = watchlistItem;
-      } else {
-        updatedWatchlist.push(watchlistItem);
-      }
-    } else {
-      updatedWatchlist = updatedWatchlist.filter(
-        (item) => item.courseId !== courseId
-      );
-    }
-
-    updatedWatchlist.sort(
-      (a, b) =>
-        new Date(b.lastWatchedAt).getTime() - new Date(a.lastWatchedAt).getTime()
-    );
-
-    updatedWatchlist = updatedWatchlist.slice(0, 10);
-
-    setWatchlist(updatedWatchlist);
-    await ProgressStorage.saveWatchlist(user.id, updatedWatchlist);
-  }
+  // (updateWatchlist was never called; Continue Learning is now rebuilt in
+  // loadAllProgress from lib/continueLearning.ts.)
 
   async function refreshWatchlist(): Promise<void> {
     if (!user?.id) return;
     const loadedWatchlist = await ProgressStorage.loadWatchlist(user.id);
-    setWatchlist(loadedWatchlist);
+    setWatchlist(normalizeWatchlist(loadedWatchlist));
   }
 
   return (
@@ -244,6 +254,7 @@ export function ProgressProvider({ children }: { children: React.ReactNode }) {
         courseProgress,
         watchlist,
         isLoading,
+        progressLoadFailed,
         getCourseProgress,
         getModuleProgress,
         updateVideoProgress,

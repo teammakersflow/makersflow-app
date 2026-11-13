@@ -4,6 +4,8 @@ import { apiClient } from '@/lib/auth/apiClient';
 import { getCourseModules } from '@/services/courseDataProvider';
 import { emitSessionExpired, isAuthError } from './sessionEvents';
 import { markProgressChanged, summarizeCourseProgress } from './courseCompletion';
+import type { ResumeCourseInput } from './continueLearning';
+import { firstThumbnailUrl } from './thumbnailUtils';
 
 // Cache progress IDs so playback updates do not repeatedly fetch all course progress.
 const lessonProgressIdCache = new Map<string, string>();
@@ -132,6 +134,8 @@ export interface UserCourseProgress {
   modules: {
     [moduleId: string]: ModuleProgress;
   };
+  /** Inputs for Continue Learning (lib/continueLearning.ts). */
+  continueInput?: ResumeCourseInput;
 }
 
 export interface ModuleProgress {
@@ -157,7 +161,10 @@ export interface VideoProgress {
 
 export interface WatchlistItem {
   courseId: string;
+  /** The lesson to resume (kept as moduleId for the existing cards/routes). */
   moduleId: string;
+  /** Same as moduleId: the lesson to resume. */
+  lessonId?: string;
   courseTitle: string;
   moduleTitle: string;
   courseThumbnail: any;
@@ -252,71 +259,60 @@ export const ProgressStorage = {
   },
 };
 
+/** Result of a manual lesson completion. */
+export type LessonCompletionResult =
+  /** The backend accepted it. */
+  | 'synced'
+  /** Sending failed; it is kept in the outbox and retried on reconnect / foreground. */
+  | 'queued';
+
 /**
- * Marks a lesson complete via backend lesson-progress API.
- * Uses PATCH /lesson-progress/:id if record exists, or POST /lesson-progress if new.
- * Identity is derived purely from JWT bearer token.
+ * Marks a lesson complete via the backend lesson-progress API.
+ *
+ * Uses the same path as playback updates (performUpsertLessonProgress): PATCH
+ * when a record exists, POST only after a successful lookup, 409 resolved to a
+ * PATCH, so retries never create duplicate rows (the backend also enforces one
+ * row per user/course/lesson). If it cannot be sent (offline, timeout, 5xx),
+ * the completion is stored in the persistent outbox as a sticky completion
+ * without a playback position and re-sent by flushPendingProgress.
+ *
+ * 'queued' means NOT confirmed: callers must not treat the lesson (or the
+ * course) as completed until the backend progress says so.
  */
 export async function markLessonComplete(
   userId: string,
   courseId: string | number,
   lessonId: string | number,
-) {
+): Promise<LessonCompletionResult> {
+  const ok = await performUpsertLessonProgress(userId, courseId, lessonId, 0, 100, {
+    completed: true,
+    noPosition: true,
+  });
+  if (ok) {
+    markProgressChanged();
+    return 'synced';
+  }
+  await progressOutbox
+    .put({ userId, courseId, lessonId, currentTimeSecs: 0, watchPercentage: 100, completed: true, noPosition: true })
+    .catch(() => {});
+  return 'queued';
+}
+
+/**
+ * Lesson ids of this course whose manual completion is still waiting in the
+ * outbox (not yet confirmed by the backend).
+ */
+export async function getPendingCompletionLessonIds(
+  userId: string,
+  courseId: string | number,
+): Promise<string[]> {
   try {
-    const numCourseId = Number(courseId);
-    const numLessonId = Number(lessonId);
-
-    let existingProgressId: string | undefined;
-    try {
-      const res = await apiClient.get<any>(`/lesson-progress/my/course/${numCourseId}`);
-      const data = res?.data || res;
-      if (data && Array.isArray(data.lessons)) {
-        const matched = data.lessons.find((l: any) => String(l.lesson_id) === String(numLessonId));
-        if (matched?.progress?.id) {
-          existingProgressId = String(matched.progress.id);
-        }
-      }
-    } catch {
-      // ignore fetch error and attempt POST
-    }
-
-    if (existingProgressId) {
-      await apiClient.patch(`/lesson-progress/${existingProgressId}`, {
-        is_completed: true,
-        watch_percentage: 100,
-        last_watched_at: new Date().toISOString(),
-      });
-    } else {
-      try {
-        await apiClient.post('/lesson-progress', {
-          course_id: numCourseId,
-          lesson_id: numLessonId,
-          is_completed: true,
-          watch_percentage: 100,
-          last_watched_at: new Date().toISOString(),
-        });
-      } catch (postErr: any) {
-        if (postErr?.status === 409 || postErr?.statusCode === 409) {
-          const res = await apiClient.get<any>(`/lesson-progress/my/course/${numCourseId}`);
-          const data = res?.data || res;
-          if (data && Array.isArray(data.lessons)) {
-            const matched = data.lessons.find((l: any) => String(l.lesson_id) === String(numLessonId));
-            if (matched?.progress?.id) {
-              await apiClient.patch(`/lesson-progress/${matched.progress.id}`, {
-                is_completed: true,
-                watch_percentage: 100,
-                last_watched_at: new Date().toISOString(),
-              });
-            }
-          }
-        } else {
-          throw postErr;
-        }
-      }
-    }
-  } catch (error: any) {
-    if (isAuthError(error)) emitSessionExpired();
-    console.warn('[progressStorage] markLessonComplete error:', error);
+    const pending = await progressOutbox.pending(userId);
+    return pending
+      .filter((u) => u.completed && String(u.courseId) === String(courseId))
+      .map((u) => String(u.lessonId));
+  } catch {
+    return [];
   }
 }
 
@@ -331,13 +327,14 @@ async function performUpsertLessonProgress(
   lessonId: string | number,
   currentTimeSecs: number,
   watchPercentage: number,
+  opts: { completed?: boolean; noPosition?: boolean } = {},
 ): Promise<boolean> {
   try {
     const numCourseId = Number(courseId);
     const numLessonId = Number(lessonId);
     const cacheKey = lessonProgressCacheKey(userId, numCourseId, numLessonId);
     const courseKey = `${userId}:${numCourseId}`;
-    const isCompleted = watchPercentage >= 90;
+    const isCompleted = opts.completed === true || watchPercentage >= 90;
 
     let existingProgressId = lessonProgressIdCache.get(cacheKey);
 
@@ -361,15 +358,22 @@ async function performUpsertLessonProgress(
       pendingLessonProgressResolution.delete(cacheKey);
     }
 
-    const payload: Record<string, any> = {
-      current_time_secs: Math.max(0, Math.floor(currentTimeSecs)),
-      watch_percentage: Math.max(0, Math.min(100, Math.round(watchPercentage))),
-      time_spent_secs: Math.max(0, Math.floor(currentTimeSecs)),
-      last_watched_at: new Date().toISOString(),
-    };
+    // A completion without a playback position must not reset the stored
+    // position or time spent.
+    const payload: Record<string, any> = opts.noPosition
+      ? { last_watched_at: new Date().toISOString() }
+      : {
+          current_time_secs: Math.max(0, Math.floor(currentTimeSecs)),
+          watch_percentage: Math.max(0, Math.min(100, Math.round(watchPercentage))),
+          time_spent_secs: Math.max(0, Math.floor(currentTimeSecs)),
+          last_watched_at: new Date().toISOString(),
+        };
 
     if (isCompleted) {
       payload.is_completed = true;
+    }
+    if (opts.completed) {
+      payload.watch_percentage = 100;
     }
 
     if (existingProgressId) {
@@ -502,13 +506,15 @@ export async function fetchCourseProgress(
           0,
         ) / 60 || (data.totalTimeSpentSecs || 0) / 60;
 
-      return { completed, total, percentage, isCompleted, completedAt, watchMinutes };
+      return { completed, total, percentage, isCompleted, completedAt, watchMinutes, failed: false };
     }
 
-    return { completed: 0, total: 0, percentage: 0, isCompleted: false, completedAt: undefined as string | undefined, watchMinutes: 0 };
+    return { completed: 0, total: 0, percentage: 0, isCompleted: false, completedAt: undefined as string | undefined, watchMinutes: 0, failed: false };
   } catch (error) {
-    console.warn('[progressStorage] fetchCourseProgress error, returning 0:', error);
-    return { completed: 0, total: 0, percentage: 0, isCompleted: false, completedAt: undefined as string | undefined, watchMinutes: 0 };
+    // `failed: true` = progress is UNKNOWN, not 0%. Callers must not show the
+    // zeros as real progress (they fall back to saved data / an error state).
+    console.warn('[progressStorage] fetchCourseProgress error:', error);
+    return { completed: 0, total: 0, percentage: 0, isCompleted: false, completedAt: undefined as string | undefined, watchMinutes: 0, failed: true };
   }
 }
 
@@ -520,6 +526,30 @@ export async function fetchCourseLessonsProgress(
   courseId: string | number,
 ) {
   try {
+    return await fetchCourseLessonsProgressStrict(userId, courseId);
+  } catch (error) {
+    console.warn('[progressStorage] fetchCourseLessonsProgress error:', error);
+    return [];
+  }
+}
+
+/**
+ * Same as fetchCourseLessonsProgress but THROWS when the request fails, so
+ * screens can tell "no progress yet" ([]) from "could not load progress" and
+ * keep what they already show instead of dropping to 0%.
+ */
+export async function fetchCourseLessonsProgressStrict(
+  userId: string,
+  courseId: string | number,
+): Promise<Array<{
+  id?: string;
+  lesson_id: any;
+  current_time_secs: number;
+  watch_percentage: number;
+  is_completed: boolean;
+  time_spent_secs: number;
+  last_watched_at: any;
+}>> {
     const res = await apiClient.get<any>(`/lesson-progress/my/course/${courseId}`);
     const data = res?.data || res;
     cacheCourseProgressIds(userId, courseId, data);
@@ -551,17 +581,18 @@ export async function fetchCourseLessonsProgress(
     }
 
     return [];
-  } catch (error) {
-    console.warn('[progressStorage] fetchCourseLessonsProgress error:', error);
-    return [];
-  }
 }
 
 /**
- * Fetches complete multi-course progress for student via backend APIs
+ * Fetches complete multi-course progress for student via backend APIs.
+ *
+ * Throws when the enrollment list cannot be loaded, so callers fall back to
+ * saved progress instead of treating a failure as "no courses". When one
+ * course's lessons or progress cannot be loaded, that course's last saved copy
+ * is used (or it is left out) instead of reporting 0%.
  */
 export async function fetchRemoteProgress(userId: string): Promise<UserCourseProgress[]> {
-  try {
+  {
     const { fetchEnrolledCourses } = require('@/services/enrollmentService');
     const enrollments = await fetchEnrolledCourses(userId);
 
@@ -573,10 +604,23 @@ export async function fetchRemoteProgress(userId: string): Promise<UserCoursePro
       const courseId = String(enrollment.course_id || enrollment.courses?.id);
       if (!courseId) continue;
 
+      let courseFetchFailed = false;
       const [modules, courseProgRes] = await Promise.all([
-        getCourseModules(courseId).catch(() => []),
-        apiClient.get<any>(`/lesson-progress/my/course/${courseId}`).catch(() => null),
+        getCourseModules(courseId).catch(() => {
+          courseFetchFailed = true;
+          return [] as any[];
+        }),
+        apiClient.get<any>(`/lesson-progress/my/course/${courseId}`).catch(() => {
+          courseFetchFailed = true;
+          return null;
+        }),
       ]);
+
+      if (courseFetchFailed) {
+        const saved = await ProgressStorage.loadCourseProgress(userId, courseId);
+        if (saved) results.push(saved);
+        continue;
+      }
 
       const courseProgData = courseProgRes?.data || courseProgRes;
       const progressList: any[] =
@@ -670,15 +714,28 @@ export async function fetchRemoteProgress(userId: string): Promise<UserCoursePro
         }
       });
 
+      // Continue Learning input (lib/continueLearning.ts): current lessons in
+      // course order plus the learner's progress. Saved with the rest, so the
+      // resume point can be rebuilt offline / after a restart.
+      const summary = summarizeCourseProgress(courseProgData);
+      courseProgressObj.continueInput = {
+        courseId,
+        courseTitle: enrollment.courses?.title ?? '',
+        thumbnailUrl: firstThumbnailUrl(enrollment.courses?.thumbnail_url) ?? null,
+        lessons: (modules || []).flatMap((mod: any) =>
+          (mod.lessons ?? []).map((les: any) => ({ id: String(les.id), title: les.title ?? '' })),
+        ),
+        progress: progressList,
+        isCompleted: summary.isCompleted,
+        percentage: summary.percentage,
+      };
+
       // Save to local ProgressStorage for offline support
       await ProgressStorage.saveCourseProgress(courseProgressObj);
       results.push(courseProgressObj);
     }
 
     return results;
-  } catch (err) {
-    console.error('[progressStorage] fetchRemoteProgress failed:', err);
-    return [];
   }
 }
 
@@ -694,7 +751,10 @@ export const progressOutbox = createProgressOutbox({
 export async function flushPendingProgress(userId: string | undefined | null): Promise<number> {
   if (!userId) return 0;
   const sent = await progressOutbox.flush(userId, (u) =>
-    performUpsertLessonProgress(u.userId, u.courseId, u.lessonId, u.currentTimeSecs, u.watchPercentage),
+    performUpsertLessonProgress(u.userId, u.courseId, u.lessonId, u.currentTimeSecs, u.watchPercentage, {
+      completed: u.completed,
+      noPosition: u.noPosition,
+    }),
   );
   if (sent > 0) markProgressChanged();
   return sent;

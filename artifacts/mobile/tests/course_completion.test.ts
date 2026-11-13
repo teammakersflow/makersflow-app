@@ -169,7 +169,10 @@ describe("screens use lesson-based completion, not completed_at alone", () => {
     assert.doesNotMatch(profile, /completedAt: enr\.enrolled_at \?\? ''/);
     assert.doesNotMatch(profile, /completeCourse\(/);
     assert.match(profile, /prog\.isCompleted/);
-    assert.match(strip(read("app/achievements.tsx")), /completedAt: prog\.completedAt/);
+    // Follow-up (courses_followups.test.ts): the certificate issue date comes
+    // first, the lesson completion time is the fallback.
+    assert.match(strip(read("app/achievements.tsx")), /lessonCompletedAt: prog\.completedAt/);
+    assert.doesNotMatch(strip(read("app/achievements.tsx")), /completedAt: enr\.completed_at \?\? null/);
   });
 
   test("ProgressContext no longer reads only camelCase completionPercentage", () => {
