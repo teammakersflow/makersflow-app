@@ -35,6 +35,7 @@ import { fetchAllCourses, fetchLessonDurations } from '@/services/courseDataProv
 import { fetchEnrolledCourses } from '@/services/enrollmentService';
 import { fetchCourseProgress, fetchCourseLessonsProgress } from '@/lib/progressStorage';
 import { ProgressCalculator } from '@/lib/progressCalculator';
+import { isCourseComplete } from '@/lib/courseCompletion';
 import { notificationService } from '@/services/notificationService';
 import { announcementService } from '@/services/announcementService';
 import { fetchCourseRatingsSummary } from '@/services/reviewService';
@@ -49,6 +50,8 @@ export interface EnrolledCourse {
   courseId: string;
   progress: number;
   completedAt: string | null;
+  /** Backend completion rule (lib/courseCompletion.ts). Optional: older cached entries lack it. */
+  isCompleted?: boolean;
 }
 
 export interface HomeProgress {
@@ -193,6 +196,7 @@ async function fetchProgress(userId: string): Promise<HomeProgress> {
           courseId: cId,
           progress: prog.percentage,
           completedAt: enr.completed_at || null,
+          isCompleted: isCourseComplete({ completedAt: enr.completed_at, isCompleted: prog.isCompleted }),
         };
       })
   );

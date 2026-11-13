@@ -37,6 +37,7 @@ import { useRequireAuth } from "@/context/AuthRequireContext";
 import { getCourseById, getCourseModules } from "@/services/courseDataProvider";
 import { enrollInCourse, getEnrollment, isExpired, clearEnrollmentCache } from "@/services/enrollmentService";
 import { fetchCourseLessonsProgress } from "@/lib/progressStorage";
+import { coursePercentage, isCourseCompleteFromLessons } from "@/lib/courseCompletion";
 import { fetchCourseReviews, fetchMyReview, upsertReview } from "@/services/reviewService";
 import { parseThumbnailUrls } from "@/lib/thumbnailUtils";
 import { homeRepository } from "@/repositories/homeRepository";
@@ -309,14 +310,22 @@ export default function CourseDetailScreen() {
   };
 
   const quiz = useMemo(() => QUIZZES.find((q) => q.courseId === course?.id), [course?.id]);
-  const isCourseCompleted = !!enrollment?.completed_at;
+  // completed_at is never stamped for students (no student API writes it), so
+  // completion also follows the backend lesson rule (lib/courseCompletion.ts).
+  // `modules` here is the course's flat lesson list.
+  const isCourseCompleted = useMemo(
+    () =>
+      !!enrollment?.completed_at ||
+      (isEnrolled && isCourseCompleteFromLessons(lessonsProgress, modules.map((m: any) => m.id))),
+    [enrollment?.completed_at, isEnrolled, lessonsProgress, modules],
+  );
   const accessExpired = useMemo(() => isExpired(enrollment), [enrollment]);
   const completedModules = useMemo(() => lessonsProgress.filter((p) => p.is_completed).length, [lessonsProgress]);
   
   const progress = useMemo(() => {
     if (isCourseCompleted) return 100;
-    if (modules.length === 0) return 0;
-    return Math.min(100, Math.round((completedModules / modules.length) * 100));
+    // Never 100% for an unfinished course (e.g. 199/200 would round up).
+    return Math.min(99, coursePercentage(completedModules, modules.length));
   }, [isCourseCompleted, completedModules, modules.length]);
 
   const remainingModules = useMemo(() => {

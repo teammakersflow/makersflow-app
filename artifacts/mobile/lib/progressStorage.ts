@@ -3,6 +3,7 @@ import { createProgressOutbox } from '@/lib/progressOutbox';
 import { apiClient } from '@/lib/auth/apiClient';
 import { getCourseModules } from '@/services/courseDataProvider';
 import { emitSessionExpired, isAuthError } from './sessionEvents';
+import { markProgressChanged, summarizeCourseProgress } from './courseCompletion';
 
 // Cache progress IDs so playback updates do not repeatedly fetch all course progress.
 const lessonProgressIdCache = new Map<string, string>();
@@ -461,6 +462,9 @@ export function upsertLessonProgress(
       );
       // M-17: never lose progress; retry from the persistent outbox later.
       if (!ok) await progressOutbox.put(nextUpdate).catch(() => {});
+      // Same 90% threshold as performUpsertLessonProgress: the lesson is now
+      // completed on the backend, so tab screens must reload on focus.
+      else if (nextUpdate.watchPercentage >= 90) markProgressChanged();
 
       nextUpdate = pendingLessonProgressUpdates.get(cacheKey);
       pendingLessonProgressUpdates.delete(cacheKey);
@@ -485,23 +489,26 @@ export async function fetchCourseProgress(
     const res = await apiClient.get<any>(`/lesson-progress/my/course/${courseId}`);
     const data = res?.data || res;
 
-    if (data && (data.total_lessons !== undefined || data.totalLessons !== undefined)) {
-      const completed = data.completed_lessons ?? data.completedLessonsCount ?? 0;
-      const total = data.total_lessons ?? data.totalLessons ?? 0;
-      const percentage = data.completion_percentage ?? data.completionPercentage ?? 0;
+    if (
+      data &&
+      (Array.isArray(data.lessons) || data.total_lessons !== undefined || data.totalLessons !== undefined)
+    ) {
+      // Completion follows the backend's is_completed (lib/courseCompletion.ts);
+      // the percentage never shows 100 for an unfinished course.
+      const { completed, total, percentage, isCompleted, completedAt } = summarizeCourseProgress(data);
       const watchMinutes =
         (data.lessons || []).reduce(
           (sum: number, l: any) => sum + (Number(l.progress?.time_spent_secs) || 0),
           0,
         ) / 60 || (data.totalTimeSpentSecs || 0) / 60;
 
-      return { completed, total, percentage, watchMinutes };
+      return { completed, total, percentage, isCompleted, completedAt, watchMinutes };
     }
 
-    return { completed: 0, total: 0, percentage: 0, watchMinutes: 0 };
+    return { completed: 0, total: 0, percentage: 0, isCompleted: false, completedAt: undefined as string | undefined, watchMinutes: 0 };
   } catch (error) {
     console.warn('[progressStorage] fetchCourseProgress error, returning 0:', error);
-    return { completed: 0, total: 0, percentage: 0, watchMinutes: 0 };
+    return { completed: 0, total: 0, percentage: 0, isCompleted: false, completedAt: undefined as string | undefined, watchMinutes: 0 };
   }
 }
 
@@ -583,7 +590,9 @@ export async function fetchRemoteProgress(userId: string): Promise<UserCoursePro
       const courseProgressObj: UserCourseProgress = {
         userId,
         courseId,
-        progress: courseProgData?.completionPercentage || 0,
+        // The backend sends completion_percentage (snake_case); reading only
+        // completionPercentage left every course at 0% here.
+        progress: summarizeCourseProgress(courseProgData).percentage,
         enrolledAt: enrollment.enrolled_at || new Date().toISOString(),
         lastAccessedAt: enrollment.enrolled_at || new Date().toISOString(),
         completedAt: enrollment.completed_at || undefined,
@@ -684,7 +693,9 @@ export const progressOutbox = createProgressOutbox({
 /** Re-send queued progress for this user (call on reconnect / app foreground / login). */
 export async function flushPendingProgress(userId: string | undefined | null): Promise<number> {
   if (!userId) return 0;
-  return progressOutbox.flush(userId, (u) =>
+  const sent = await progressOutbox.flush(userId, (u) =>
     performUpsertLessonProgress(u.userId, u.courseId, u.lessonId, u.currentTimeSecs, u.watchPercentage),
   );
+  if (sent > 0) markProgressChanged();
+  return sent;
 }

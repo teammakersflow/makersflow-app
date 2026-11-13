@@ -1,5 +1,6 @@
 import { apiClient } from '@/lib/auth/apiClient';
 import { expiryBlocksAccess, hasActiveAccess } from '@/lib/courseAccess';
+import { markProgressChanged } from '@/lib/courseCompletion';
 
 const ENROLLMENT_CACHE_TTL_MS = 10000;
 let enrollmentCacheGeneration = 0;
@@ -14,6 +15,8 @@ export function clearEnrollmentCache() {
 
 async function invalidateCaches() {
   clearEnrollmentCache();
+  // Tab screens keep data in memory; this makes them reload on next focus.
+  markProgressChanged();
   try {
     const { homeRepository } = require('@/repositories/homeRepository');
     const { coursesRepository } = require('@/repositories/coursesRepository');
@@ -141,8 +144,11 @@ export function isExpired(enrollment: any): boolean {
 }
 
 /**
- * Marks course completion if supported. In the backend, course completion is automatically
- * triggered upon 100% lesson progress sync.
+ * Called after the learner finishes the last lesson. There is no student API
+ * that stamps enrollments.completed_at (only the admin PATCH does), so this
+ * does not write anything: the app derives completion from lesson progress
+ * (lib/courseCompletion.ts). It only drops cached enrollment/progress data so
+ * every screen picks up the finished course.
  */
 export async function completeCourse(_userId?: string, _courseId?: string | number) {
   await invalidateCaches();

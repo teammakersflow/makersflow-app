@@ -31,6 +31,7 @@ import { useFavorites } from "@/context/FavoritesContext";
 import { useProgress } from "@/context/ProgressContext";
 import { getCourseById, getCourseModules } from "@/services/courseDataProvider";
 import { markLessonComplete, upsertLessonProgress, fetchCourseLessonsProgress } from "@/lib/progressStorage";
+import { coursePercentage, isCourseCompleteFromLessons } from "@/lib/courseCompletion";
 import { apiRequest } from "@/lib/auth/apiClient";
 import { getEnrollment, isExpired, completeCourse } from "@/services/enrollmentService";
 import { ActivityIndicator } from "react-native";
@@ -374,13 +375,18 @@ export default function LearnScreen() {
     return refreshSignedVideoUrl(id);
   }, [refreshSignedVideoUrl]);
 
-  const isCourseCompleted = !!enrollment?.completed_at;
+  // completed_at is never stamped for students (no student API writes it), so
+  // completion also follows the backend lesson rule (lib/courseCompletion.ts).
+  const isCourseCompleted =
+    !!enrollment?.completed_at ||
+    isCourseCompleteFromLessons(lessonsProgress, lessons.map((l: any) => l.id));
   const completedModules = lessonsProgress.filter((p) => p.is_completed).length;
   const effectiveTotalLessons = totalLessons || lessons.length;
   const remainingModules = isCourseCompleted ? 0 : (effectiveTotalLessons - completedModules);
+  // Never 100% for an unfinished course (e.g. 199/200 would round up).
   const progressPercentage = isCourseCompleted
     ? 100
-    : (effectiveTotalLessons > 0 ? Math.min(100, Math.round((completedModules / effectiveTotalLessons) * 100)) : 0);
+    : Math.min(99, coursePercentage(completedModules, effectiveTotalLessons));
 
   const activeModule = lessons.find((m) => m.id === activeModuleId) ?? lessons[0];
   const activeLessonProgress = lessonsProgress.find((p) => String(p.lesson_id) === activeModule?.id);

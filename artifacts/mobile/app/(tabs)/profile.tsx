@@ -30,7 +30,7 @@ import { useColors } from "@/hooks/useColors";
 import { notificationService } from "@/services/notificationService";
 import { announcementService } from "@/services/announcementService";
 import { getCourseModules } from "@/services/courseDataProvider";
-import { completeCourse, fetchEnrolledCourses } from "@/services/enrollmentService";
+import { fetchEnrolledCourses } from "@/services/enrollmentService";
 import { fetchCourseProgress } from "@/lib/progressStorage";
 import { ProductCard } from "@/components/ProductCard";
 import { CertificateSkeleton, WishlistSkeleton } from "@/components/SkeletonLoader";
@@ -172,13 +172,14 @@ export default function ProfileScreen() {
             }
 
             const prog = await fetchCourseProgress(user.id, courseId);
-            if (prog.total > 0 && prog.completed >= prog.total) {
-              // Auto-persist completed_at to DB so future queries find it on the enrollment row
-              completeCourse(user.id, courseId).catch(() => {});
+            if (prog.isCompleted) {
+              // No student API stamps completed_at (completeCourse never wrote
+              // it), so use when the last lesson was completed, not the
+              // enrollment date.
               results.push({
                 courseId,
                 courseTitle,
-                completedAt: enr.enrolled_at ?? '',
+                completedAt: prog.completedAt ?? enr.enrolled_at ?? '',
                 level,
                 instructor,
               });
