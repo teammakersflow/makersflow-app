@@ -29,9 +29,10 @@ import { apiRequest } from "@/lib/auth/apiClient";
 import { isNetworkError } from "@/lib/networkUtils";
 import { ProgressCalculator } from "@/lib/progressCalculator";
 import { HomeSkeleton } from "@/components/SkeletonLoader";
-import { fetchCourseProgress, fetchCourseLessonsProgress } from "@/lib/progressStorage";
+import { fetchCourseProgress, fetchCourseLessonsProgress, CourseProgressUnavailableError } from "@/lib/progressStorage";
 import { getProgressVersion, isCourseComplete } from "@/lib/courseCompletion";
 import { LoadErrorNotice } from "@/components/LoadErrorNotice";
+import { classifyApiError, loadErrorMessage, type ApiErrorKind } from "@/lib/apiErrorKind";
 
 function formatTotalTime(totalMinutes: number): string {
   const minutes = Math.round(totalMinutes);
@@ -85,12 +86,19 @@ export default function ProgressScreen() {
   // The last load failed / at least one load succeeded.
   const [loadError, setLoadError] = useState(false);
   const [hasLoaded, setHasLoaded] = useState(false);
+  const [loadErrorKind, setLoadErrorKind] = useState<ApiErrorKind | undefined>(undefined);
+  // Only the newest load may update the screen (an older load that hit HTTP
+  // 429 must not overwrite a newer success).
+  const statsLoadGeneration = useRef(0);
 
-  const loadStatsAndCourses = useCallback(async (isRefreshing = false) => {
+  /** userInitiated: pull-to-refresh / Retry also skips the short shared progress cache. */
+  const loadStatsAndCourses = useCallback(async (isRefreshing = false, userInitiated = false) => {
     if (!user?.id) {
       setIsLoadingCourses(false);
       return;
     }
+    const gen = ++statsLoadGeneration.current;
+    const isLatest = () => gen === statsLoadGeneration.current;
     loadedProgressVersion.current = getProgressVersion();
     if (!isRefreshing) {
       setIsLoadingCourses(true);
@@ -111,9 +119,11 @@ export default function ProgressScreen() {
         description: c.description || "",
         modules: []
       }));
+      if (!isLatest()) return;
       setCourses(mapped);
 
       const enrollments = await fetchEnrolledCourses(user.id);
+      if (!isLatest()) return;
       const totalCoursesEnrolled = enrollments.length;
       setEnrolledCount(totalCoursesEnrolled);
 
@@ -129,12 +139,14 @@ export default function ProgressScreen() {
         if (!courseDetails) continue;
 
         // Use same fetchCourseProgress function
-        const prog = await fetchCourseProgress(user.id, courseId);
+        // Shared per user+course request (lib/courseRequests.ts).
+        const prog = await fetchCourseProgress(user.id, courseId, { force: userInitiated });
         // Unknown progress is not 0%: fail this load (previous stats stay).
-        if (prog.failed) throw new Error(`Progress unavailable for course ${courseId}`);
+        if (prog.failed) throw new CourseProgressUnavailableError(courseId, prog.errorKind);
         const courseProgPct = prog.percentage;
 
         try {
+          // Same shared response as fetchCourseProgress above: no second request.
           const lessons = await fetchCourseLessonsProgress(user.id, courseId);
           lessons.forEach((lp: any) => {
             progressList.push({
@@ -169,6 +181,7 @@ export default function ProgressScreen() {
           progress: courseProgPct,
         });
       }
+      if (!isLatest()) return;
       setEnrolledCoursesProgress(enrolledProgressList);
 
       const averageProgress = totalCoursesEnrolled > 0 ? Math.round(progressSum / totalCoursesEnrolled) : 0;
@@ -267,7 +280,9 @@ export default function ProgressScreen() {
       recentlyCompleted.sort((a: any, b: any) => new Date(b.completedAt).getTime() - new Date(a.completedAt).getTime());
       const topRecentlyCompleted = recentlyCompleted.slice(0, 10);
 
+      if (!isLatest()) return;
       setLoadError(false);
+      setLoadErrorKind(undefined);
       setHasLoaded(true);
       setStats({
         totalCoursesEnrolled,
@@ -308,9 +323,12 @@ export default function ProgressScreen() {
     } catch (err) {
       console.error('[Progress] Error loading stats & courses:', err);
       // Keep the stats already shown; never present a failure as "no courses".
-      setLoadError(true);
+      if (isLatest()) {
+        setLoadError(true);
+        setLoadErrorKind(classifyApiError(err));
+      }
     } finally {
-      setIsLoadingCourses(false);
+      if (isLatest()) setIsLoadingCourses(false);
     }
   }, [user?.id]);
 
@@ -328,7 +346,7 @@ export default function ProgressScreen() {
 
   const onRefresh = async () => {
     setRefreshing(true);
-    await loadStatsAndCourses(true);
+    await loadStatsAndCourses(true, true);
     setRefreshing(false);
   };
 
@@ -437,11 +455,7 @@ export default function ProgressScreen() {
         <View style={{ marginHorizontal: 20, marginBottom: 12 }}>
           <LoadErrorNotice
             variant={hasLoaded ? "banner" : "card"}
-            message={
-              hasLoaded
-                ? "Couldn't refresh your progress. Showing what was last loaded."
-                : "We couldn't load your progress. Check your connection and try again."
-            }
+            message={loadErrorMessage(loadErrorKind, hasLoaded)}
             onRetry={onRefresh}
             retrying={refreshing}
           />

@@ -9,6 +9,7 @@ import {
   fetchRemoteProgress,
 } from "@/lib/progressStorage";
 import { markProgressChanged } from "@/lib/courseCompletion";
+import { courseRequests } from "@/lib/courseRequests";
 import { buildContinueLearning, ResumeCourseInput } from "@/lib/continueLearning";
 
 const DEFAULT_COURSE_THUMBNAIL = require("@/assets/images/courses/course_robotics.webp");
@@ -76,7 +77,8 @@ interface ProgressContextType {
   completeModule: (courseId: string, moduleId: string) => Promise<void>;
   enrollCourse: (courseId: string) => Promise<void>;
   refreshWatchlist: () => Promise<void>;
-  refreshProgress: () => Promise<void>;
+  /** `force`: skip the short shared cache (pull-to-refresh / Retry only). */
+  refreshProgress: (opts?: { force?: boolean }) => Promise<void>;
 }
 
 const ProgressContext = createContext<ProgressContextType | null>(null);
@@ -92,9 +94,16 @@ export function ProgressProvider({ children }: { children: React.ReactNode }) {
   // from saved data. Screens use it to show an error/retry state.
   const [progressLoadFailed, setProgressLoadFailed] = useState(false);
   const hydratedForUser = useRef<string | null>(null);
+  // Only the newest loadAllProgress run may update state, so a slower, older
+  // run (e.g. one that hit HTTP 429) can never overwrite a newer success.
+  const loadGeneration = useRef(0);
 
   // Load all progress on mount or user change
   useEffect(() => {
+    // Another account (or sign-out): drop every shared course response and
+    // ignore runs still in flight for the previous user.
+    courseRequests.clear();
+    loadGeneration.current += 1;
     if (user?.id) {
       loadAllProgress();
     } else {
@@ -106,20 +115,25 @@ export function ProgressProvider({ children }: { children: React.ReactNode }) {
     }
   }, [user?.id]);
 
-  async function loadAllProgress() {
+  async function loadAllProgress(opts?: { force?: boolean }) {
     if (!user?.id) return;
+    const gen = ++loadGeneration.current;
+    const isLatest = () => gen === loadGeneration.current;
 
     // After an app restart, show the saved Continue Learning cards right away
     // while the backend data loads.
     if (hydratedForUser.current !== user.id) {
       hydratedForUser.current = user.id;
       const saved = await ProgressStorage.loadWatchlist(user.id).catch(() => []);
-      if (saved.length > 0) setWatchlist(normalizeWatchlist(saved));
+      if (saved.length > 0 && isLatest()) setWatchlist(normalizeWatchlist(saved));
     }
 
     setIsLoading(true);
     try {
-      let allProgress = await fetchRemoteProgress(user.id);
+      // Course progress, /modules and /lessons are shared with the screens
+      // (lib/courseRequests.ts): concurrent runs cost no extra requests.
+      let allProgress = await fetchRemoteProgress(user.id, opts);
+      if (!isLatest()) return;
 
       // Save to local storage for offline use
       for (const p of allProgress) {
@@ -138,6 +152,7 @@ export function ProgressProvider({ children }: { children: React.ReactNode }) {
       setProgressLoadFailed(false);
     } catch (error) {
       console.error("Failed to load progress:", error);
+      if (!isLatest()) return;
       setProgressLoadFailed(true);
       // Fallback to local storage on error (e.g. offline). Keep what is
       // already shown rather than replacing it with nothing.
@@ -155,7 +170,7 @@ export function ProgressProvider({ children }: { children: React.ReactNode }) {
         console.error("Failed to load local progress fallback:", localError);
       }
     } finally {
-      setIsLoading(false);
+      if (isLatest()) setIsLoading(false);
     }
   }
 

@@ -1,11 +1,22 @@
 import { apiClient } from '@/lib/auth/apiClient';
 import { expiryBlocksAccess, hasActiveAccess } from '@/lib/courseAccess';
 import { markProgressChanged } from '@/lib/courseCompletion';
+import { courseRequests } from '@/lib/courseRequests';
 
 const ENROLLMENT_CACHE_TTL_MS = 10000;
 let enrollmentCacheGeneration = 0;
 const enrollmentCache = new Map<string, { data: any[]; timestamp: number }>();
 const enrollmentRequests = new Map<string, Promise<any[]>>();
+
+/**
+ * The learner just gained access to a course (enrollment created or
+ * confirmed active). GET /lessons returns lesson content/notes only for
+ * entitled courses, so drop the shared /modules + /lessons copy
+ * (lib/courseRequests.ts) to make the next screen fetch the entitled version.
+ */
+export function onEntitlementGained() {
+  courseRequests.invalidateStructure();
+}
 
 export function clearEnrollmentCache() {
   enrollmentCacheGeneration += 1;
@@ -45,6 +56,10 @@ export async function enrollInCourse(
       course_id: Number(courseId),
     });
 
+    // Enrolled: GET /lessons now returns this course's lesson content and
+    // notes, so the shared copy fetched before enrolling must not be reused.
+    // Only on success (a failed POST throws above and invalidates nothing).
+    onEntitlementGained();
     await invalidateCaches();
     return res?.data || res;
   } catch (error: any) {

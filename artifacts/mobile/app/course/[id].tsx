@@ -35,9 +35,10 @@ import { useAuth } from "@/context/AuthContext";
 import { useFavorites } from "@/context/FavoritesContext";
 import { useRequireAuth } from "@/context/AuthRequireContext";
 import { getCourseById, getCourseModules } from "@/services/courseDataProvider";
-import { enrollInCourse, getEnrollment, isExpired, clearEnrollmentCache } from "@/services/enrollmentService";
+import { enrollInCourse, getEnrollment, isExpired, clearEnrollmentCache, onEntitlementGained } from "@/services/enrollmentService";
 import { fetchCourseLessonsProgress, fetchCourseLessonsProgressStrict } from "@/lib/progressStorage";
 import { LoadErrorNotice } from "@/components/LoadErrorNotice";
+import { classifyApiError, loadErrorMessage, type ApiErrorKind } from "@/lib/apiErrorKind";
 import { coursePercentage, isCourseCompleteFromLessons } from "@/lib/courseCompletion";
 import { fetchCourseReviews, fetchMyReview, upsertReview } from "@/services/reviewService";
 import { parseThumbnailUrls } from "@/lib/thumbnailUtils";
@@ -72,6 +73,7 @@ export default function CourseDetailScreen() {
   const [isEnrolling, setIsEnrolling] = useState(false);
   // Lesson progress could not be loaded (offline / API error).
   const [progressLoadError, setProgressLoadError] = useState(false);
+  const [progressErrorKind, setProgressErrorKind] = useState<ApiErrorKind | undefined>(undefined);
   const [refreshing, setRefreshing] = useState(false);
   const isFavorite = course ? isFavoriteCourse(course.id) : false;
 
@@ -110,7 +112,9 @@ export default function CourseDetailScreen() {
 
   const [isOfflineCached, setIsOfflineCached] = useState(false);
 
-  const loadCourseData = useCallback(async (isRefreshing = false, cancelledRef = { current: false }) => {
+  // userInitiated (pull-to-refresh / Retry) also skips the short shared
+  // progress cache; on-focus reloads reuse it (no duplicate requests).
+  const loadCourseData = useCallback(async (isRefreshing = false, cancelledRef = { current: false }, userInitiated = false) => {
     if (!id) {
       setCourseKit(null);
       return;
@@ -275,7 +279,7 @@ export default function CourseDetailScreen() {
           if (enrolledStatus) {
             // Strict: a failed request must not show as "0 of N completed".
             const progressRes = await Promise.allSettled([
-              fetchCourseLessonsProgressStrict(user.id, id),
+              fetchCourseLessonsProgressStrict(user.id, id, { force: userInitiated }),
             ]);
 
             if (cancelledRef.current) return;
@@ -285,6 +289,7 @@ export default function CourseDetailScreen() {
             } else {
               // Keep any progress already shown; offer a retry.
               setProgressLoadError(true);
+              setProgressErrorKind(classifyApiError(progressRes[0].reason));
             }
           }
         } else if (user?.id && enrollmentRes.status === 'rejected') {
@@ -314,7 +319,7 @@ export default function CourseDetailScreen() {
 
   const onRefresh = async () => {
     setRefreshing(true);
-    await loadCourseData(true);
+    await loadCourseData(true, undefined, true);
   };
 
   const quiz = useMemo(() => QUIZZES.find((q) => q.courseId === course?.id), [course?.id]);
@@ -478,6 +483,9 @@ export default function CourseDetailScreen() {
             );
             return;
           }
+          // Access confirmed (e.g. renewed elsewhere): lesson content/notes are
+          // now returned, so do not reuse the pre-enrollment /lessons copy.
+          onEntitlementGained();
           setEnrollment(fresh);
           setIsEnrolled(true);
           setEnrollmentStatusKnown(true);
@@ -703,11 +711,7 @@ export default function CourseDetailScreen() {
               {/* Progress */}
               {isEnrolled && progressLoadError && (
                 <LoadErrorNotice
-                  message={
-                    lessonsProgress.length > 0
-                      ? "Couldn't refresh your progress. Showing what was last loaded."
-                      : "We couldn't load your progress for this course."
-                  }
+                  message={loadErrorMessage(progressErrorKind, lessonsProgress.length > 0)}
                   onRetry={onRefresh}
                   retrying={refreshing}
                 />

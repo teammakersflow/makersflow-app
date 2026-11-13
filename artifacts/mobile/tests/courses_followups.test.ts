@@ -248,9 +248,10 @@ describe("original completion date", () => {
 // ── 3. Error states ──────────────────────────────────────────────────────────
 describe("failed requests are not shown as empty / 0%", () => {
   test("fetchCourseProgress reports failure; repositories and Progress refuse unknown progress", () => {
-    assert.match(strip(read("lib/progressStorage.ts")), /watchMinutes: 0, failed: true \}/);
+    // Rate-limit fix (2026-11-13): failures also carry their kind.
+    assert.match(strip(read("lib/progressStorage.ts")), /watchMinutes: 0, failed: true, errorKind: classifyApiError\(error\)/);
     for (const f of ["repositories/coursesRepository.ts", "repositories/homeRepository.ts", "app/(tabs)/progress.tsx"]) {
-      assert.match(strip(read(f)), /if \(prog\.failed\) throw new Error/, f);
+      assert.match(strip(read(f)), /if \(prog\.failed\) throw new CourseProgressUnavailableError\([^)]*prog\.errorKind\)/, f);
     }
   });
 
@@ -263,11 +264,11 @@ describe("failed requests are not shown as empty / 0%", () => {
 
   test("repositories flag errors; Home never caches zeros over saved progress", () => {
     const courses = strip(read("repositories/coursesRepository.ts"));
-    assert.equal((courses.match(/loadFromCache\(userId\)\), error: true \}/g) ?? []).length, 2, "offline + failure");
+    assert.equal((courses.match(/loadFromCache\(userId\)\), error: true, errorKind: /g) ?? []).length, 2, "offline + failure");
     assert.match(courses, /\(!userId \|\| enrollmentsResult\)/, "no fake empty list while enrollments load");
     const home = strip(read("repositories/homeRepository.ts"));
     assert.doesNotMatch(home, /fetchProgress\(userId\)\.catch\(\(\) => EMPTY_PROGRESS\)/);
-    assert.match(home, /progressFailed \? \{ \.\.\.result, error: true \} : result/);
+    assert.match(home, /progressFailed \? \{ \.\.\.result, error: true, errorKind: progressErrorKind \} : result/);
   });
 
   test("screens show error + retry instead of empty states and keep loaded data", () => {
@@ -276,11 +277,14 @@ describe("failed requests are not shown as empty / 0%", () => {
     assert.match(courses, /result\.data\.enrollments\.length > 0 \|\| prev\.length === 0 \? result\.data\.enrollments : prev/);
     const home = strip(read("app/(tabs)/index.tsx"));
     assert.match(home, /statsUnknown \? "–"/);
-    assert.match(home, /progressError \|\| progressLoadFailed/);
+    // Rate-limit fix (2026-11-13): Home shows only its OWN failure; a
+    // background (context) failure no longer puts an error on Home.
+    assert.match(home, /\{progressError && \(/);
+    assert.doesNotMatch(home, /progressLoadFailed/);
     const progress = strip(read("app/(tabs)/progress.tsx"));
     assert.match(progress, /loadError && !hasLoaded \? null : stats\.totalCoursesEnrolled === 0/);
     const detail = strip(read("app/course/[id].tsx"));
-    assert.match(detail, /fetchCourseLessonsProgressStrict\(user\.id, id\)/);
+    assert.match(detail, /fetchCourseLessonsProgressStrict\(user\.id, id, \{ force: userInitiated \}\)/);
     assert.match(detail, /isEnrolled && progressLoadError &&/);
     const learn = strip(read("app/course/learn.tsx"));
     assert.match(learn, /setProgressLoadError\(true\)/);

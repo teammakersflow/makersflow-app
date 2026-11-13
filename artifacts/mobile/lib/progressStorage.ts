@@ -6,6 +6,8 @@ import { emitSessionExpired, isAuthError } from './sessionEvents';
 import { markProgressChanged, summarizeCourseProgress } from './courseCompletion';
 import type { ResumeCourseInput } from './continueLearning';
 import { firstThumbnailUrl } from './thumbnailUtils';
+import { courseRequests } from './courseRequests';
+import { classifyApiError, type ApiErrorKind } from './apiErrorKind';
 
 // Cache progress IDs so playback updates do not repeatedly fetch all course progress.
 const lessonProgressIdCache = new Map<string, string>();
@@ -19,20 +21,22 @@ const pendingLessonProgressUpdates = new Map<string, { userId: string; courseId:
 async function lookupCourseProgressIds(
   userId: string,
   courseId: string | number,
+  fresh = false,
 ): Promise<boolean> {
   const courseKey = `${userId}:${courseId}`;
 
   const existingRequest = courseProgressLookupInFlight.get(courseKey);
-  if (existingRequest) return existingRequest;
+  if (existingRequest && !fresh) return existingRequest;
 
   const retryAfter = courseProgressLookupRetryAfter.get(courseKey) || 0;
   if (Date.now() < retryAfter) return false;
 
   const request = (async () => {
     try {
-      const response = await apiClient.get<any>(
-        `/lesson-progress/my/course/${Number(courseId)}`,
-      );
+      // Shared with every screen (lib/courseRequests.ts). The cache is
+      // invalidated after each write from this device; `fresh` (409 recovery)
+      // always asks the server.
+      const response = await courseRequests.courseProgress(userId, courseId, { force: fresh });
       cacheCourseProgressIds(userId, courseId, response);
       courseProgressLookupRetryAfter.delete(courseKey);
       return true;
@@ -295,6 +299,9 @@ export async function markLessonComplete(
   await progressOutbox
     .put({ userId, courseId, lessonId, currentTimeSecs: 0, watchPercentage: 100, completed: true, noPosition: true })
     .catch(() => {});
+  // Nothing changed on the server yet, but drop the shared copy so the next
+  // read shows the real state once the queued completion syncs.
+  courseRequests.invalidateCourseProgress(userId, courseId);
   return 'queued';
 }
 
@@ -378,6 +385,8 @@ async function performUpsertLessonProgress(
 
     if (existingProgressId) {
       await apiClient.patch(`/lesson-progress/${existingProgressId}`, payload);
+      // This course's progress changed: the next read fetches it again.
+      courseRequests.invalidateCourseProgress(userId, numCourseId);
       return true;
     }
 
@@ -387,6 +396,7 @@ async function performUpsertLessonProgress(
         lesson_id: numLessonId,
         ...payload,
       });
+      courseRequests.invalidateCourseProgress(userId, numCourseId);
 
       const createdId = findCreatedProgressId(created);
       const posted = true;
@@ -397,7 +407,7 @@ async function performUpsertLessonProgress(
       } else {
         pendingLessonProgressResolution.add(cacheKey);
 
-        const lookupSucceeded = await lookupCourseProgressIds(userId, numCourseId);
+        const lookupSucceeded = await lookupCourseProgressIds(userId, numCourseId, true);
         const resolvedId = lessonProgressIdCache.get(cacheKey);
 
         if (resolvedId) {
@@ -411,12 +421,14 @@ async function performUpsertLessonProgress(
       if (postErr?.status === 409 || postErr?.statusCode === 409) {
         pendingLessonProgressResolution.add(cacheKey);
 
-        const lookupSucceeded = await lookupCourseProgressIds(userId, numCourseId);
+        // The row exists but the shared copy may predate it: ask the server.
+        const lookupSucceeded = await lookupCourseProgressIds(userId, numCourseId, true);
         const resolvedId = lessonProgressIdCache.get(cacheKey);
 
         if (resolvedId) {
           pendingLessonProgressResolution.delete(cacheKey);
           await apiClient.patch(`/lesson-progress/${resolvedId}`, payload);
+          courseRequests.invalidateCourseProgress(userId, numCourseId);
           return true;
         } else if (lookupSucceeded) {
           courseProgressLookupRetryAfter.set(courseKey, Date.now() + 30000);
@@ -486,11 +498,14 @@ export function upsertLessonProgress(
  * Fetches course-level progress via GET /lesson-progress/my/course/:courseId
  */
 export async function fetchCourseProgress(
-  _userId: string,
+  userId: string,
   courseId: string | number,
+  opts?: { force?: boolean; freshSince?: number },
 ) {
   try {
-    const res = await apiClient.get<any>(`/lesson-progress/my/course/${courseId}`);
+    // Shared with every other screen for this user+course (one request per
+    // window instead of one per caller): lib/courseRequests.ts.
+    const res = await courseRequests.courseProgress(userId, courseId, opts);
     const data = res?.data || res;
 
     if (
@@ -506,15 +521,24 @@ export async function fetchCourseProgress(
           0,
         ) / 60 || (data.totalTimeSpentSecs || 0) / 60;
 
-      return { completed, total, percentage, isCompleted, completedAt, watchMinutes, failed: false };
+      return { completed, total, percentage, isCompleted, completedAt, watchMinutes, failed: false, errorKind: undefined as ApiErrorKind | undefined };
     }
 
-    return { completed: 0, total: 0, percentage: 0, isCompleted: false, completedAt: undefined as string | undefined, watchMinutes: 0, failed: false };
+    return { completed: 0, total: 0, percentage: 0, isCompleted: false, completedAt: undefined as string | undefined, watchMinutes: 0, failed: false, errorKind: undefined as ApiErrorKind | undefined };
   } catch (error) {
     // `failed: true` = progress is UNKNOWN, not 0%. Callers must not show the
     // zeros as real progress (they fall back to saved data / an error state).
+    // `errorKind` lets the screen say what happened (busy, offline, ...).
     console.warn('[progressStorage] fetchCourseProgress error:', error);
-    return { completed: 0, total: 0, percentage: 0, isCompleted: false, completedAt: undefined as string | undefined, watchMinutes: 0, failed: true };
+    return { completed: 0, total: 0, percentage: 0, isCompleted: false, completedAt: undefined as string | undefined, watchMinutes: 0, failed: true, errorKind: classifyApiError(error) as ApiErrorKind | undefined };
+  }
+}
+
+/** Error carrying the kind of the first failed course-progress request. */
+export class CourseProgressUnavailableError extends Error {
+  constructor(courseId: string | number, public kind: ApiErrorKind | undefined) {
+    super(`Progress unavailable for course ${courseId}`);
+    this.name = 'CourseProgressUnavailableError';
   }
 }
 
@@ -524,9 +548,10 @@ export async function fetchCourseProgress(
 export async function fetchCourseLessonsProgress(
   userId: string,
   courseId: string | number,
+  opts?: { force?: boolean },
 ) {
   try {
-    return await fetchCourseLessonsProgressStrict(userId, courseId);
+    return await fetchCourseLessonsProgressStrict(userId, courseId, opts);
   } catch (error) {
     console.warn('[progressStorage] fetchCourseLessonsProgress error:', error);
     return [];
@@ -541,6 +566,7 @@ export async function fetchCourseLessonsProgress(
 export async function fetchCourseLessonsProgressStrict(
   userId: string,
   courseId: string | number,
+  opts?: { force?: boolean },
 ): Promise<Array<{
   id?: string;
   lesson_id: any;
@@ -550,7 +576,8 @@ export async function fetchCourseLessonsProgressStrict(
   time_spent_secs: number;
   last_watched_at: any;
 }>> {
-    const res = await apiClient.get<any>(`/lesson-progress/my/course/${courseId}`);
+    // Shared request (lib/courseRequests.ts): same response as fetchCourseProgress.
+    const res = await courseRequests.courseProgress(userId, courseId, opts);
     const data = res?.data || res;
     cacheCourseProgressIds(userId, courseId, data);
 
@@ -591,7 +618,10 @@ export async function fetchCourseLessonsProgressStrict(
  * course's lessons or progress cannot be loaded, that course's last saved copy
  * is used (or it is left out) instead of reporting 0%.
  */
-export async function fetchRemoteProgress(userId: string): Promise<UserCourseProgress[]> {
+export async function fetchRemoteProgress(
+  userId: string,
+  opts?: { force?: boolean },
+): Promise<UserCourseProgress[]> {
   {
     const { fetchEnrolledCourses } = require('@/services/enrollmentService');
     const enrollments = await fetchEnrolledCourses(userId);
@@ -610,7 +640,7 @@ export async function fetchRemoteProgress(userId: string): Promise<UserCoursePro
           courseFetchFailed = true;
           return [] as any[];
         }),
-        apiClient.get<any>(`/lesson-progress/my/course/${courseId}`).catch(() => {
+        courseRequests.courseProgress(userId, courseId, opts).catch(() => {
           courseFetchFailed = true;
           return null;
         }),

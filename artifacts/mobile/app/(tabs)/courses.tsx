@@ -13,6 +13,7 @@ import { useNetwork } from "@/context/NetworkContext";
 import { useTabSwipe } from "@/hooks/useTabSwipe";
 import { getProgressVersion } from "@/lib/courseCompletion";
 import { LoadErrorNotice } from "@/components/LoadErrorNotice";
+import { classifyApiError, loadErrorMessage, type ApiErrorKind } from "@/lib/apiErrorKind";
 
 export default function CoursesScreen() {
   const colors = useColors();
@@ -30,6 +31,7 @@ export default function CoursesScreen() {
   const [refreshing, setRefreshing] = useState(false);
   // The last load failed: what is shown (if anything) is saved data.
   const [loadError, setLoadError] = useState(false);
+  const [loadErrorKind, setLoadErrorKind] = useState<ApiErrorKind | undefined>(undefined);
   const [selectedCategory, setSelectedCategory] = useState("All");
 
   // Debounce ref — prevents rapid reconnect events from triggering repeated refreshes
@@ -50,7 +52,9 @@ export default function CoursesScreen() {
   }, [user?.id]);
 
   // ── Single repository call — screen does not know data origin ─────────────
-  const loadData = useCallback(async (isRefreshing = false) => {
+  // userInitiated: pull-to-refresh / Retry also skips the short shared
+  // progress cache (everything else reuses it: no duplicate requests).
+  const loadData = useCallback(async (isRefreshing = false, userInitiated = false) => {
     const requestId = ++requestGenerationRef.current;
     const requestUserId = user?.id;
     loadedProgressVersion.current = getProgressVersion();
@@ -70,7 +74,8 @@ export default function CoursesScreen() {
           setEnrolledCourses(bgData.enrollments);
           setBrowseMoreCourses(bgData.catalog);
           setLoadError(false);
-        }
+        },
+        userInitiated,
       );
 
       if (
@@ -81,6 +86,7 @@ export default function CoursesScreen() {
       if (result.error) {
         // Failed request: never replace what is shown with an empty list.
         setLoadError(true);
+        setLoadErrorKind(result.errorKind);
         setEnrolledCourses((prev) => (result.data.enrollments.length > 0 || prev.length === 0 ? result.data.enrollments : prev));
         setBrowseMoreCourses((prev) => (result.data.catalog.length > 0 || prev.length === 0 ? result.data.catalog : prev));
       } else {
@@ -93,6 +99,7 @@ export default function CoursesScreen() {
       if (requestId === requestGenerationRef.current) {
         console.error('[CoursesScreen] loadData error:', err);
         setLoadError(true);
+        setLoadErrorKind(classifyApiError(err));
       }
     } finally {
       if (requestId === requestGenerationRef.current) {
@@ -132,7 +139,7 @@ export default function CoursesScreen() {
 
   const onRefresh = async () => {
     setRefreshing(true);
-    await loadData(true);
+    await loadData(true, true);
   };
 
   // Completion follows the backend rule (lib/courseCompletion.ts); entries
@@ -263,7 +270,7 @@ export default function CoursesScreen() {
               // A failed request is not "no enrolled courses".
               <LoadErrorNotice
                 variant="card"
-                message="We couldn't load your courses. Check your connection and try again."
+                message={loadErrorMessage(loadErrorKind, false)}
                 onRetry={onRefresh}
                 retrying={refreshing}
               />
@@ -279,7 +286,7 @@ export default function CoursesScreen() {
                 {loadError && (
                   <View style={{ marginBottom: 12 }}>
                     <LoadErrorNotice
-                      message="Couldn't refresh your courses. Showing what was last loaded."
+                      message={loadErrorMessage(loadErrorKind, true)}
                       onRetry={onRefresh}
                       retrying={refreshing}
                     />

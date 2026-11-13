@@ -38,6 +38,7 @@ import { useNetwork } from "@/context/NetworkContext";
 import { useTabSwipe } from "@/hooks/useTabSwipe";
 import { getProgressVersion } from "@/lib/courseCompletion";
 import { LoadErrorNotice } from "@/components/LoadErrorNotice";
+import { classifyApiError, loadErrorMessage, type ApiErrorKind } from "@/lib/apiErrorKind";
 
 const CATEGORY_DETAILS = [
   { name: "Robotics", icon: "construct", desc: "Build & program smart autonomous robots", btnText: "Start Now", btnColor: "#0B6FAD", textColor: "#FFF" },
@@ -270,9 +271,15 @@ export default function HomeScreen() {
   const [unreadNotifCount, setUnreadNotifCount] = useState(0);
   const [activeBannerIndex, setActiveBannerIndex] = useState(0);
   const bannerFlatListRef = useRef<any>(null);
-  const { refreshProgress, progressLoadFailed } = useProgress();
-  // Progress could not be loaded (offline / API error).
+  const { refreshProgress } = useProgress();
+  // Latest function without making loadData depend on it (it changes on every
+  // provider render, which would re-run the focus/sign-in effects).
+  const refreshProgressRef = useRef(refreshProgress);
+  refreshProgressRef.current = refreshProgress;
+  // Home's OWN progress load failed (a background/context failure does not
+  // put an error on Home when Home's data loaded).
   const [progressError, setProgressError] = useState(false);
+  const [progressErrorKind, setProgressErrorKind] = useState<ApiErrorKind | undefined>(undefined);
   // At least one real progress result has been shown (not just the zeros
   // the screen starts with).
   const [hasProgressData, setHasProgressData] = useState(false);
@@ -287,27 +294,52 @@ export default function HomeScreen() {
 
   // ── Single repository call — screen does not know data origin ─────────────
   const loadedProgressVersion = useRef(getProgressVersion());
-  const loadData = useCallback(async (isRefreshing = false) => {
+  // Only the newest load may update the screen (an older, slower load that hit
+  // HTTP 429 must not overwrite a newer success).
+  const homeLoadGeneration = useRef(0);
+  // The user id the private data was last loaded for (dedupes the first-focus
+  // load and the sign-in effect, which used to both run at startup).
+  const loadedForUserRef = useRef<string | null>(null);
+  /**
+   * isRefreshing: bypass Home's saved repository cache.
+   * kind: 'user' = pull-to-refresh / Retry (also skips the short shared
+   *   progress cache); 'initial' = first load for this user (the progress
+   *   context loads itself on sign-in, so it is not reloaded here);
+   *   'auto' = reconnect / progress changed elsewhere.
+   */
+  const loadData = useCallback(async (isRefreshing = false, kind: 'initial' | 'auto' | 'user' = 'auto') => {
+    const gen = ++homeLoadGeneration.current;
+    const isLatest = () => gen === homeLoadGeneration.current;
     // Recorded before any await so a quick refocus during this load does not
     // start a second one.
     loadedProgressVersion.current = getProgressVersion();
+    if (user?.id) loadedForUserRef.current = user.id;
     if (!isRefreshing) setIsLoading(true);
+    // A user refresh forces ONE progress request per course (the context
+    // refresh below); Home's own repository load then reuses anything fetched
+    // since this moment instead of forcing a second request per course.
+    const refreshStartedAt = Date.now();
     try {
-      await refreshProgress().catch(() => {});
+      if (kind !== 'initial') {
+        await refreshProgressRef.current({ force: kind === 'user' }).catch(() => {});
+      }
 
       const result = await homeRepository.get(
         user?.id,
         isOffline,
         isRefreshing,
         (bgData) => {
+          if (!isLatest()) return;
           setEnrolledCourses(bgData.progress.enrolledCourses);
           setLearningStreak(bgData.progress.learningStreak);
           setLongestStreak(bgData.progress.longestStreak);
           setTotalLessonsCompleted(bgData.progress.totalLessonsCompleted);
           setTotalHoursLearned(bgData.progress.totalHoursLearned);
           setUnreadNotifCount(bgData.unreadNotifCount);
-        }
+        },
+        kind === 'user' ? { freshSince: refreshStartedAt } : {},
       );
+      if (!isLatest()) return;
       const data = result.data;
 
       setPromotions(data.promotions);
@@ -318,6 +350,7 @@ export default function HomeScreen() {
       // stats with zeros; keep what is shown and flag the error.
       const progressFailed = !!result.error && !!user?.id;
       setProgressError(progressFailed);
+      setProgressErrorKind(progressFailed ? result.errorKind : undefined);
       if (!progressFailed || data.progress.enrolledCourses.length > 0) {
         setEnrolledCourses(data.progress.enrolledCourses);
         setLearningStreak(data.progress.learningStreak);
@@ -329,9 +362,13 @@ export default function HomeScreen() {
       setUnreadNotifCount(data.unreadNotifCount);
     } catch (err) {
       console.error('[Home] loadData error:', err);
-      if (user?.id) setProgressError(true);
+      if (user?.id && isLatest()) {
+        setProgressError(true);
+        setProgressErrorKind(classifyApiError(err));
+      }
     } finally {
-      setIsLoading(false);
+      // Always reset; a newer load may still be running and will reset again.
+      if (isLatest()) setIsLoading(false);
     }
   }, [user?.id, isOffline]);
 
@@ -353,7 +390,11 @@ export default function HomeScreen() {
     useCallback(() => {
       if (!hasLoadedOnce.current) {
         hasLoadedOnce.current = true;   // mark loaded so we never show the skeleton again
-        loadData(false); // first load — show skeleton
+        // Skip if the sign-in effect already loaded for this user (either effect
+        // can run first): exactly one startup load.
+        if (!(user?.id && loadedForUserRef.current === user.id)) {
+          loadData(false, 'initial'); // first load — show skeleton
+        }
       } else if (loadedProgressVersion.current !== getProgressVersion()) {
         // Progress or enrollments changed elsewhere (e.g. a course was just
         // finished): reload so the stats are current.
@@ -371,7 +412,8 @@ export default function HomeScreen() {
   // EMPTY_PROGRESS — 0 courses, 0 completed, 0% — and because hasLoadedOnce was
   // already true nothing ever re-fetched. The stats sat at zero until a manual
   // pull-to-refresh. Watch for the id arriving and load the private data then.
-  const loadedForUserRef = useRef<string | null>(null);
+  // (loadedForUserRef is set by loadData, so when the first-focus load already
+  // ran for this user this effect does nothing: one startup load, not two.)
   useEffect(() => {
     const uid = user?.id ?? null;
     if (!uid) {
@@ -379,14 +421,14 @@ export default function HomeScreen() {
       return;
     }
     if (loadedForUserRef.current === uid) return;
-    loadedForUserRef.current = uid;
-    // Force a refresh so we bypass any logged-out cache entry written earlier.
-    loadData(true);
+    // Bypass any logged-out cache entry written earlier.
+    loadData(true, 'initial');
   }, [user?.id, loadData]);
 
   const onRefresh = async () => {
     setRefreshing(true);
-    await loadData(true);
+    // User-initiated: fetch fresh progress (still shared, still rate-limit aware).
+    await loadData(true, 'user');
     setRefreshing(false);
   };
 
@@ -529,14 +571,10 @@ export default function HomeScreen() {
             </View>
           </View>
 
-          {(progressError || progressLoadFailed) && (
+          {progressError && (
             <View style={{ marginHorizontal: 20, marginTop: -12, marginBottom: 20 }}>
               <LoadErrorNotice
-                message={
-                  statsUnknown
-                    ? "We couldn't load your progress. Check your connection and try again."
-                    : "Couldn't refresh your progress. Showing what was last loaded."
-                }
+                message={loadErrorMessage(progressErrorKind, !statsUnknown)}
                 onRetry={onRefresh}
                 retrying={refreshing}
               />
