@@ -180,8 +180,13 @@ describe("manual completion: outbox", () => {
   test("markLessonComplete returns synced/queued, dedupes via the upsert path, and queues on failure", () => {
     const ps = strip(read("lib/progressStorage.ts"));
     assert.match(ps, /Promise<LessonCompletionResult>/);
-    assert.match(ps, /performUpsertLessonProgress\(userId, courseId, lessonId, 0, 100, \{\s*completed: true,\s*noPosition: true,\s*\}\)/);
-    assert.match(ps, /progressOutbox\s*\.put\(\{ userId, courseId, lessonId, currentTimeSecs: 0, watchPercentage: 100, completed: true, noPosition: true \}\)/);
+    // 2026-11-13 (review M1): sent through the lesson's write queue (same
+    // upsert path, via its send adapter); the failure reason goes to the caller.
+    // Clock fix: stamped once (session + sequence) and the same object is queued.
+    assert.match(ps, /const completion = lessonWrites\.stamp\(\{\s*userId, courseId, lessonId, currentTimeSecs: 0, watchPercentage: 100, completed: true, noPosition: true, at: Date\.now\(\),\s*\}\);\s*const r = await lessonWrites\.complete\(completion\);/);
+    assert.match(ps, /opts\.onFailure\?\.\(r\.error\);/);
+    assert.match(ps, /const ok = await performUpsertLessonProgress\(u\.userId, u\.courseId, u\.lessonId, u\.currentTimeSecs, u\.watchPercentage, \{/);
+    assert.match(ps, /await progressOutbox\.put\(completion\)\.catch\(\(\) => \{\}\);/);
     assert.match(ps, /return 'queued';/);
     assert.match(ps, /completed: u\.completed,\s*noPosition: u\.noPosition,/, "flush replays the completion flags");
     assert.match(ps, /const isCompleted = opts\.completed === true \|\| watchPercentage >= 90;/);
@@ -189,8 +194,14 @@ describe("manual completion: outbox", () => {
 
   test("learn screen: queued completion is shown as pending and never completes the course", () => {
     const src = strip(read("app/course/learn.tsx"));
-    const queuedBranches = src.match(/if \(result === 'queued'\) \{[\s\S]*?return;\s*\}/g) ?? [];
-    assert.equal(queuedBranches.length, 2, "video end + Mark Complete");
+    // 2026-11-13 (review M3): the outcome of the shared request is handled in
+    // handleCompletionOutcome, once per request.
+    const queuedBranches = src.match(/if \(outcome\.result === 'queued'\) \{[\s\S]*?\n {6}return;\n {4}\}/g) ?? [];
+    // 2026-11-13: the button and the video end now share ONE guarded path
+    // (runLessonCompletion), so there is exactly one queued branch, used by both.
+    assert.equal(queuedBranches.length, 1, "one shared path for video end + Mark Complete");
+    assert.match(src, /const handleVideoComplete = useCallback\(\(\) => \{\s*if \(activeModule\?\.id\) void runLessonCompletion\(String\(activeModule\.id\)\);/);
+    assert.match(src, /const handleMarkComplete = \(\) => \{\s*if \(!activeModule\?\.id\) return;\s*void runLessonCompletion\(String\(activeModule\.id\)\);/);
     for (const b of queuedBranches) {
       assert.match(b, /setPendingCompletionIds/);
       assert.doesNotMatch(b, /completeCourse|issueCertificate|setShowCompleteModal/);

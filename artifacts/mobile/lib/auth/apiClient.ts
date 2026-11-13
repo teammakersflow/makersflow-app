@@ -4,6 +4,18 @@ import { Platform } from 'react-native';
 import * as Device from 'expo-device';
 import Constants from 'expo-constants';
 import { createRateLimitGate, runWithRateLimitRetry } from './retryPolicy';
+import { profileMatchesToken } from '@/lib/profileCacheCore';
+
+/**
+ * Request options. `expectedUserId` (2026-11-13, review M6): the request is
+ * only sent if the current access token belongs to that user (JWT `sub`,
+ * same check as the profile cache). Checked right before fetch, so a request
+ * made for one account can never go out with another account's token.
+ */
+export type ApiRequestOptions = RequestInit & { expectedUserId?: string };
+
+/** Thrown (not sent) when the signed-in account is not the expected one. */
+export const SESSION_CHANGED_MESSAGE = 'Signed-in account changed; request not sent.';
 
 export function getApiBaseUrl(): string {
   const envUrl = process.env.EXPO_PUBLIC_API_URL;
@@ -172,7 +184,7 @@ export function isApiOrigin(url: string, baseUrl: string): boolean {
  */
 export async function apiRequest<T = any>(
   endpoint: string,
-  options: RequestInit = {},
+  options: ApiRequestOptions = {},
   isRetry = false
 ): Promise<T> {
   return runWithRateLimitRetry<T>({
@@ -189,9 +201,10 @@ export async function apiRequest<T = any>(
 /** One attempt (with the existing 401 refresh-and-retry-once behaviour). */
 async function sendApiRequest<T = any>(
   endpoint: string,
-  options: RequestInit = {},
+  allOptions: ApiRequestOptions = {},
   isRetry = false
 ): Promise<T> {
+  const { expectedUserId, ...options } = allOptions;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
 
@@ -211,6 +224,11 @@ async function sendApiRequest<T = any>(
 
   // L-19: never attach our bearer token to a third-party URL.
   const accessToken = await tokenStorage.getAccessToken();
+  // M6: no await between this check and fetch below.
+  if (expectedUserId !== undefined && !profileMatchesToken({ id: expectedUserId }, accessToken)) {
+    clearTimeout(timeoutId);
+    throw new ApiError(0, SESSION_CHANGED_MESSAGE, { sessionChanged: true });
+  }
   if (accessToken && !headers['Authorization'] && isApiOrigin(url, baseUrl)) {
     headers['Authorization'] = `Bearer ${accessToken}`;
   }
@@ -234,7 +252,7 @@ async function sendApiRequest<T = any>(
         throw new ApiError(401, 'Session expired. Please log in again.');
       }
       // Single attempt: the outer 429 policy already wraps this request.
-      return sendApiRequest<T>(endpoint, options, true);
+      return sendApiRequest<T>(endpoint, allOptions, true);
     }
     if (!response.ok) {
       const errorData = await response.json().catch(() => null);
@@ -261,26 +279,26 @@ async function sendApiRequest<T = any>(
 }
 
 export const apiClient = {
-  get: <T = any>(endpoint: string, options?: RequestInit) =>
+  get: <T = any>(endpoint: string, options?: ApiRequestOptions) =>
     apiRequest<T>(endpoint, { ...options, method: 'GET' }),
-  post: <T = any>(endpoint: string, body?: any, options?: RequestInit) =>
+  post: <T = any>(endpoint: string, body?: any, options?: ApiRequestOptions) =>
     apiRequest<T>(endpoint, {
       ...options,
       method: 'POST',
       body: body !== undefined ? JSON.stringify(body) : undefined,
     }),
-  put: <T = any>(endpoint: string, body?: any, options?: RequestInit) =>
+  put: <T = any>(endpoint: string, body?: any, options?: ApiRequestOptions) =>
     apiRequest<T>(endpoint, {
       ...options,
       method: 'PUT',
       body: body !== undefined ? JSON.stringify(body) : undefined,
     }),
-  patch: <T = any>(endpoint: string, body?: any, options?: RequestInit) =>
+  patch: <T = any>(endpoint: string, body?: any, options?: ApiRequestOptions) =>
     apiRequest<T>(endpoint, {
       ...options,
       method: 'PATCH',
       body: body !== undefined ? JSON.stringify(body) : undefined,
     }),
-  delete: <T = any>(endpoint: string, options?: RequestInit) =>
+  delete: <T = any>(endpoint: string, options?: ApiRequestOptions) =>
     apiRequest<T>(endpoint, { ...options, method: 'DELETE' }),
 };

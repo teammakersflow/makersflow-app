@@ -166,7 +166,12 @@ export const COURSE_DATA_TTL_MS = 15_000;
 
 export interface CourseRequestSourcesDeps {
   /** GET a path from the API (apiClient.get in the app). */
-  getJson: (path: string) => Promise<any>;
+  /**
+   * GET a path from the API (apiClient.get in the app). `forUserId`: the
+   * account the data is for; the app refuses to send it with another
+   * account's token (review M6).
+   */
+  getJson: (path: string, forUserId?: string) => Promise<any>;
   ttlMs?: number;
   now?: () => number;
 }
@@ -220,8 +225,8 @@ export function createCourseRequestSources(deps: CourseRequestSourcesDeps): Cour
 
   const progressKey = (userId: string, courseId: string | number) => `${userId}|${Number(courseId)}`;
 
-  const fetchValidated = async (path: string, valid: (r: any) => boolean, what: string) => {
-    const res = await deps.getJson(path);
+  const fetchValidated = async (path: string, valid: (r: any) => boolean, what: string, forUserId?: string | null) => {
+    const res = await deps.getJson(path, forUserId ? String(forUserId) : undefined);
     if (!valid(res)) throw new MalformedResponseError(what);
     return res;
   };
@@ -232,7 +237,7 @@ export function createCourseRequestSources(deps: CourseRequestSourcesDeps): Cour
       const id = Number(courseId);
       return progress.get(
         progressKey(userId, id),
-        () => fetchValidated(`/lesson-progress/my/course/${id}`, isValidCourseProgressResponse, "course progress"),
+        () => fetchValidated(`/lesson-progress/my/course/${id}`, isValidCourseProgressResponse, "course progress", userId),
         opts,
       );
     },
@@ -246,11 +251,11 @@ export function createCourseRequestSources(deps: CourseRequestSourcesDeps): Cour
     },
     allModules(owner, opts) {
       scopeTo(owner);
-      return structure.get(`${owner ?? "anon"}|modules`, () => fetchValidated("/modules", isValidListResponse, "modules"), opts);
+      return structure.get(`${owner ?? "anon"}|modules`, () => fetchValidated("/modules", isValidListResponse, "modules", owner), opts);
     },
     allLessons(owner, opts) {
       scopeTo(owner);
-      return structure.get(`${owner ?? "anon"}|lessons`, () => fetchValidated("/lessons", isValidListResponse, "lessons"), opts);
+      return structure.get(`${owner ?? "anon"}|lessons`, () => fetchValidated("/lessons", isValidListResponse, "lessons", owner), opts);
     },
     invalidateStructure() {
       structure.clear();

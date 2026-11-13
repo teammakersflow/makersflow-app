@@ -58,6 +58,10 @@ export function VideoPlayerEnhanced({
   const [isLoading, setIsLoading] = useState(true);
   const [lastStatus, setLastStatus] = useState<string>("");
   const [hasError, setHasError] = useState(false);
+  // The last signed-URL refresh was refused with HTTP 429: say "server is
+  // busy" instead of "check your connection", and stop automatic retries
+  // (the shared rate-limit gate would refuse them anyway until Retry-After).
+  const [isServerBusy, setIsServerBusy] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
   const [isRetrying, setIsRetrying] = useState(false);
   // Buffering watchdog: if the player sits in "loading" beyond this window,
@@ -107,11 +111,23 @@ export function VideoPlayerEnhanced({
       loadingSince.current = null;
       setIsStalled(false);
       setHasError(false);
+      setIsServerBusy(false);
       setIsRetrying(true);
       return true;
     } catch (error) {
       devError("[VideoPlayer] Source refresh/retry failed:", error);
+      const busy = (error as any)?.status === 429;
+      if (busy) {
+        // No further automatic retries for this error; the user can tap
+        // Try Again after the wait.
+        if (retryTimerRef.current) {
+          clearTimeout(retryTimerRef.current);
+          retryTimerRef.current = null;
+        }
+        retryCountRef.current = 3;
+      }
       if (isMounted.current) {
+        setIsServerBusy(busy);
         setHasError(true);
         setIsRetrying(false);
       }
@@ -847,7 +863,9 @@ export function VideoPlayerEnhanced({
           <View style={[styles.errorContainer, { backgroundColor: colors.card }]}>
             <Feather name="alert-circle" size={32} color="#DC2626" />
             <Text style={[styles.errorTitle, { color: colors.foreground }]}>
-              Unable to load video. Please check your connection.
+              {isServerBusy
+                ? "Server is busy. Please wait a moment, then try again."
+                : "Unable to load video. Please check your connection."}
             </Text>
             <View style={styles.errorBtnRow}>
               <Pressable

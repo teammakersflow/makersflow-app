@@ -11,6 +11,7 @@ import {
 import { markProgressChanged } from "@/lib/courseCompletion";
 import { courseRequests } from "@/lib/courseRequests";
 import { buildContinueLearning, ResumeCourseInput } from "@/lib/continueLearning";
+import { createProgressRefreshCoordinator } from "@/lib/progressRefreshCoordinator";
 
 const DEFAULT_COURSE_THUMBNAIL = require("@/assets/images/courses/course_robotics.webp");
 
@@ -97,6 +98,15 @@ export function ProgressProvider({ children }: { children: React.ReactNode }) {
   // Only the newest loadAllProgress run may update state, so a slower, older
   // run (e.g. one that hit HTTP 429) can never overwrite a newer success.
   const loadGeneration = useRef(0);
+  // Latest course map, for merging a single-course refresh (completeModule).
+  // Also set synchronously wherever a map is applied, so a merge right after a
+  // full load never starts from the previous render's (possibly empty) map.
+  const courseProgressRef = useRef(courseProgress);
+  courseProgressRef.current = courseProgress;
+  // Review H1: a single-course refresh is merged only into a complete map;
+  // before the first full load completes, the full load is used instead.
+  const refreshCoordinator = useRef(createProgressRefreshCoordinator()).current;
+  const currentUserIdRef = useRef<string | null>(null);
 
   // Load all progress on mount or user change
   useEffect(() => {
@@ -104,19 +114,28 @@ export function ProgressProvider({ children }: { children: React.ReactNode }) {
     // ignore runs still in flight for the previous user.
     courseRequests.clear();
     loadGeneration.current += 1;
+    refreshCoordinator.reset();
+    currentUserIdRef.current = user?.id ?? null;
     if (user?.id) {
       loadAllProgress();
     } else {
       hydratedForUser.current = null;
-      setCourseProgress(new Map());
+      courseProgressRef.current = new Map();
+      setCourseProgress(courseProgressRef.current);
       setWatchlist([]);
       setProgressLoadFailed(false);
       setIsLoading(false);
     }
   }, [user?.id]);
 
-  async function loadAllProgress(opts?: { force?: boolean }) {
-    if (!user?.id) return;
+  /** Full load, tracked by the refresh coordinator (see completeModule). */
+  function loadAllProgress(opts?: { force?: boolean }): Promise<void> {
+    return refreshCoordinator.runFull(() => loadAllProgressRun(opts)).then(() => undefined);
+  }
+
+  /** Resolves true when a complete, current map from the backend was applied. */
+  async function loadAllProgressRun(opts?: { force?: boolean }): Promise<boolean> {
+    if (!user?.id) return false;
     const gen = ++loadGeneration.current;
     const isLatest = () => gen === loadGeneration.current;
 
@@ -133,7 +152,7 @@ export function ProgressProvider({ children }: { children: React.ReactNode }) {
       // Course progress, /modules and /lessons are shared with the screens
       // (lib/courseRequests.ts): concurrent runs cost no extra requests.
       let allProgress = await fetchRemoteProgress(user.id, opts);
-      if (!isLatest()) return;
+      if (!isLatest()) return false;
 
       // Save to local storage for offline use
       for (const p of allProgress) {
@@ -142,6 +161,7 @@ export function ProgressProvider({ children }: { children: React.ReactNode }) {
 
       const progressMap = new Map<string, UserCourseProgress>();
       allProgress.forEach((p) => progressMap.set(p.courseId, p));
+      courseProgressRef.current = progressMap;
       setCourseProgress(progressMap);
 
       // Continue Learning is rebuilt from scratch on every load (no stale or
@@ -150,9 +170,10 @@ export function ProgressProvider({ children }: { children: React.ReactNode }) {
       setWatchlist(rebuilt);
       await ProgressStorage.saveWatchlist(user.id, rebuilt);
       setProgressLoadFailed(false);
+      return isLatest();
     } catch (error) {
       console.error("Failed to load progress:", error);
-      if (!isLatest()) return;
+      if (!isLatest()) return false;
       setProgressLoadFailed(true);
       // Fallback to local storage on error (e.g. offline). Keep what is
       // already shown rather than replacing it with nothing.
@@ -161,6 +182,7 @@ export function ProgressProvider({ children }: { children: React.ReactNode }) {
         if (localProgress.length > 0) {
           const progressMap = new Map<string, UserCourseProgress>();
           localProgress.forEach((p) => progressMap.set(p.courseId, p));
+          courseProgressRef.current = progressMap;
           setCourseProgress(progressMap);
         }
         const fromSaved = buildWatchlist(localProgress);
@@ -169,6 +191,7 @@ export function ProgressProvider({ children }: { children: React.ReactNode }) {
       } catch (localError) {
         console.error("Failed to load local progress fallback:", localError);
       }
+      return false;
     } finally {
       if (isLatest()) setIsLoading(false);
     }
@@ -248,9 +271,40 @@ export function ProgressProvider({ children }: { children: React.ReactNode }) {
     await invalidateRepositories();
   }
 
+  /**
+   * A lesson was completed (Mark Lesson Complete, or automatically at 90%
+   * watched). Only that course changed, so only that course is reloaded: one
+   * progress request (shared with the lesson screen's own reload,
+   * lib/courseRequests.ts) instead of one per enrolled course.
+   *
+   * Review H1: the course is merged only into a COMPLETE map. While the first
+   * full load is still running it is awaited (not discarded); if none has
+   * succeeded yet, a full load runs instead (lib/progressRefreshCoordinator.ts).
+   * Other screens reload on focus via markProgressChanged (invalidateRepositories).
+   */
   async function completeModule(courseId: string, moduleId: string): Promise<void> {
     if (!user?.id) return;
-    await loadAllProgress();
+    const userId = user.id;
+    try {
+      await refreshCoordinator.refreshCourse({
+        startFull: () => loadAllProgressRun(),
+        refreshOne: async () => {
+          const [updated] = await fetchRemoteProgress(userId, { onlyCourseId: String(courseId) });
+          if (!updated || currentUserIdRef.current !== userId) return;
+          const next = new Map(courseProgressRef.current);
+          next.set(updated.courseId, updated);
+          courseProgressRef.current = next;
+          setCourseProgress(next);
+          // Continue Learning from the complete map, never from one course.
+          const rebuilt = buildWatchlist(Array.from(next.values()));
+          setWatchlist(rebuilt);
+          await ProgressStorage.saveWatchlist(userId, rebuilt);
+        },
+      });
+    } catch (error) {
+      // Keep what is shown; screens still reload on focus (below).
+      console.warn("Failed to refresh completed course progress:", error);
+    }
     await invalidateRepositories();
   }
 

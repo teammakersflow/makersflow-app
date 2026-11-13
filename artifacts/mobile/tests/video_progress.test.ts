@@ -70,7 +70,8 @@ describe("M-17 progress outbox", () => {
 
   test("failed upserts go to the outbox; it is flushed on login/foreground/reconnect", () => {
     const ps = strip(read("lib/progressStorage.ts"));
-    assert.match(ps, /if \(!ok\) await progressOutbox\.put\(nextUpdate\)/);
+    // 2026-11-13 (review M1): failed playback saves are queued by the lesson write queue.
+    assert.match(ps, /onFailed: \(u, kind\) => \{[\s\S]*?if \(kind === 'save'\) progressOutbox\.put\(u\)/);
     assert.match(ps, /export async function flushPendingProgress/);
     const gate = strip(read("components/AppGate.tsx"));
     assert.match(gate, /flushPendingProgress\(uid\)/);

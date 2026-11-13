@@ -423,7 +423,9 @@ describe("429 retry policy", () => {
     assert.match(src, /return runWithRateLimitRetry<T>\(\{/);
     assert.match(src, /response\.status === 429 \? response\.headers\?\.get\?\.\('retry-after'\)/);
     assert.match(src, /const newToken = await refreshOnce\(\);/);
-    assert.match(src, /return sendApiRequest<T>\(endpoint, options, true\);/);
+    // 2026-11-13 (review M6): the retry keeps the identity check (allOptions).
+    assert.match(src, /return sendApiRequest<T>\(endpoint, allOptions, true\);/);
+    assert.match(src, /if \(expectedUserId !== undefined && !profileMatchesToken\(\{ id: expectedUserId \}, accessToken\)\) \{/);
   });
 });
 
@@ -492,7 +494,8 @@ describe("screens", () => {
     const ctx = strip(read("context/ProgressContext.tsx"));
     assert.match(ctx, /courseRequests\.clear\(\);\s*loadGeneration\.current \+= 1;/);
     assert.match(ctx, /const gen = \+\+loadGeneration\.current;/);
-    assert.match(ctx, /if \(!isLatest\(\)\) return;\s*setProgressLoadFailed\(true\);/);
+    // 2026-11-13 (review H1): runs report whether they applied a complete map.
+    assert.match(ctx, /if \(!isLatest\(\)\) return false;\s*setProgressLoadFailed\(true\);/);
   });
 
   test("Progress tab and My Learning guard against stale loads and force only on Retry", () => {

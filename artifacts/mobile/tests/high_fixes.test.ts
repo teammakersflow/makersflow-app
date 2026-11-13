@@ -124,7 +124,8 @@ describe("H-8 / M-22 signed video URL", () => {
     assert.match(s, /key=\{`local-\$\{activeModule\?\.id\}`\}/);
   });
   test("failed signed-URL fetch shows an error with retry instead of a blank area", () => {
-    assert.match(s, /setSignedUrlError\(status === 401 \|\| status === 403 \? "forbidden" : "network"\)/);
+    // 2026-11-13: HTTP 429 is its own "busy" state, not a connection error.
+    assert.match(s, /setSignedUrlError\(\s*status === 401 \|\| status === 403 \? "forbidden" : status === 429 \? "busy" : "network",?\s*\)/);
     assert.match(s, /setSignedUrlAttempt\(\(n\) => n \+ 1\)/);
   });
   test("player resumes position after a source swap", () => {

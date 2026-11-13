@@ -303,8 +303,15 @@ export default function CourseDetailScreen() {
     );
   }, [id, user?.id]);
 
+  // The mount effect below and the first focus used to both load the course
+  // (two /courses/:id, reviews and my-review requests on every open). The
+  // first focus after a (re)load is now skipped; later focuses (coming back
+  // from a lesson) still reload.
+  const skipFocusLoadFor = useRef<typeof loadCourseData | null>(null);
+
   useEffect(() => {
     const cancelledRef = { current: false };
+    skipFocusLoadFor.current = loadCourseData;
     loadCourseData(false, cancelledRef);
     return () => {
       cancelledRef.current = true;
@@ -313,6 +320,10 @@ export default function CourseDetailScreen() {
 
   useFocusEffect(
     useCallback(() => {
+      if (skipFocusLoadFor.current === loadCourseData) {
+        skipFocusLoadFor.current = null;
+        return;
+      }
       loadCourseData(true);
     }, [loadCourseData])
   );

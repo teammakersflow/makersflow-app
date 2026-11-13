@@ -1,7 +1,10 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { createProgressOutbox } from '@/lib/progressOutbox';
+import { createProgressOutbox, nextFlushDelayMs, runProgressFlush } from '@/lib/progressOutbox';
+import { createLessonWriteQueue, type LessonUpdate } from '@/lib/lessonWriteQueue';
+import { parseRetryAfterMs } from '@/lib/auth/retryPolicy';
 import { apiClient } from '@/lib/auth/apiClient';
 import { getCourseModules } from '@/services/courseDataProvider';
+import { cacheManager } from '@/services/cacheManager';
 import { emitSessionExpired, isAuthError } from './sessionEvents';
 import { markProgressChanged, summarizeCourseProgress } from './courseCompletion';
 import type { ResumeCourseInput } from './continueLearning';
@@ -14,9 +17,10 @@ const lessonProgressIdCache = new Map<string, string>();
 // Prevent repeated course-progress GETs after temporary API failures.
 const courseProgressLookupRetryAfter = new Map<string, number>();
 const courseProgressLookupInFlight = new Map<string, Promise<boolean>>();
+// Why the last id lookup for a course failed (e.g. HTTP 429), for callers that
+// need to explain a queued completion.
+const courseProgressLookupLastError = new Map<string, unknown>();
 const pendingLessonProgressResolution = new Set<string>();
-const lessonProgressUpsertInFlight = new Map<string, Promise<void>>();
-const pendingLessonProgressUpdates = new Map<string, { userId: string; courseId: string | number; lessonId: string | number; currentTimeSecs: number; watchPercentage: number }>();
 
 async function lookupCourseProgressIds(
   userId: string,
@@ -37,10 +41,15 @@ async function lookupCourseProgressIds(
       // invalidated after each write from this device; `fresh` (409 recovery)
       // always asks the server.
       const response = await courseRequests.courseProgress(userId, courseId, { force: fresh });
+      // The request is only sent with this user's token (apiClient
+      // expectedUserId); never file ids under an account that is no longer signed in.
+      if (String(cacheManager.userScope().owner) !== String(userId)) throw new Error('Signed-in account changed.');
       cacheCourseProgressIds(userId, courseId, response);
       courseProgressLookupRetryAfter.delete(courseKey);
+      courseProgressLookupLastError.delete(courseKey);
       return true;
-    } catch {
+    } catch (err) {
+      courseProgressLookupLastError.set(courseKey, err);
       courseProgressLookupRetryAfter.set(courseKey, Date.now() + 30000);
       return false;
     } finally {
@@ -263,7 +272,7 @@ export const ProgressStorage = {
   },
 };
 
-/** Result of a manual lesson completion. */
+/** Result of a lesson completion (Mark Lesson Complete, or automatic at 90% watched). */
 export type LessonCompletionResult =
   /** The backend accepted it. */
   | 'synced'
@@ -287,18 +296,26 @@ export async function markLessonComplete(
   userId: string,
   courseId: string | number,
   lessonId: string | number,
+  opts: {
+    /** Why sending failed (the completion is queued either way), e.g. HTTP 429 + Retry-After. */
+    onFailure?: (error: unknown) => void;
+  } = {},
 ): Promise<LessonCompletionResult> {
-  const ok = await performUpsertLessonProgress(userId, courseId, lessonId, 0, 100, {
-    completed: true,
-    noPosition: true,
+  // Review M1: through the lesson's write queue. It waits only for the
+  // request in flight for this lesson (never for later playback saves), and
+  // concurrent completions of the lesson share one request.
+  // Stamped once (session + sequence), so the request and a queued outbox
+  // entry share the same order (lib/lessonWriteQueue.ts isNewerUpdate).
+  const completion = lessonWrites.stamp({
+    userId, courseId, lessonId, currentTimeSecs: 0, watchPercentage: 100, completed: true, noPosition: true, at: Date.now(),
   });
-  if (ok) {
+  const r = await lessonWrites.complete(completion);
+  if (r.ok) {
     markProgressChanged();
     return 'synced';
   }
-  await progressOutbox
-    .put({ userId, courseId, lessonId, currentTimeSecs: 0, watchPercentage: 100, completed: true, noPosition: true })
-    .catch(() => {});
+  opts.onFailure?.(r.error);
+  await progressOutbox.put(completion).catch(() => {});
   // Nothing changed on the server yet, but drop the shared copy so the next
   // read shows the real state once the queued completion syncs.
   courseRequests.invalidateCourseProgress(userId, courseId);
@@ -306,7 +323,7 @@ export async function markLessonComplete(
 }
 
 /**
- * Lesson ids of this course whose manual completion is still waiting in the
+ * Lesson ids of this course whose completion is still waiting in the
  * outbox (not yet confirmed by the backend).
  */
 export async function getPendingCompletionLessonIds(
@@ -334,7 +351,7 @@ async function performUpsertLessonProgress(
   lessonId: string | number,
   currentTimeSecs: number,
   watchPercentage: number,
-  opts: { completed?: boolean; noPosition?: boolean } = {},
+  opts: { completed?: boolean; noPosition?: boolean; onError?: (error: unknown) => void } = {},
 ): Promise<boolean> {
   try {
     const numCourseId = Number(courseId);
@@ -349,7 +366,10 @@ async function performUpsertLessonProgress(
       const lookupSucceeded = await lookupCourseProgressIds(userId, numCourseId);
 
       // Never POST when the lookup failed; the record may already exist.
-      if (!lookupSucceeded) return false;
+      if (!lookupSucceeded) {
+        opts.onError?.(courseProgressLookupLastError.get(courseKey));
+        return false;
+      }
 
       existingProgressId = lessonProgressIdCache.get(cacheKey);
 
@@ -384,7 +404,7 @@ async function performUpsertLessonProgress(
     }
 
     if (existingProgressId) {
-      await apiClient.patch(`/lesson-progress/${existingProgressId}`, payload);
+      await apiClient.patch(`/lesson-progress/${existingProgressId}`, payload, { expectedUserId: String(userId) });
       // This course's progress changed: the next read fetches it again.
       courseRequests.invalidateCourseProgress(userId, numCourseId);
       return true;
@@ -395,7 +415,7 @@ async function performUpsertLessonProgress(
         course_id: numCourseId,
         lesson_id: numLessonId,
         ...payload,
-      });
+      }, { expectedUserId: String(userId) });
       courseRequests.invalidateCourseProgress(userId, numCourseId);
 
       const createdId = findCreatedProgressId(created);
@@ -427,7 +447,7 @@ async function performUpsertLessonProgress(
 
         if (resolvedId) {
           pendingLessonProgressResolution.delete(cacheKey);
-          await apiClient.patch(`/lesson-progress/${resolvedId}`, payload);
+          await apiClient.patch(`/lesson-progress/${resolvedId}`, payload, { expectedUserId: String(userId) });
           courseRequests.invalidateCourseProgress(userId, numCourseId);
           return true;
         } else if (lookupSucceeded) {
@@ -439,11 +459,41 @@ async function performUpsertLessonProgress(
       }
     }
   } catch (error: any) {
+    opts.onError?.(error);
     console.error('[progress] upsert error', error);
     if (isAuthError(error)) emitSessionExpired();
     return false;
   }
 }
+
+/**
+ * One writer per lesson (lib/lessonWriteQueue.ts, review M1/M4): playback
+ * saves are coalesced, a completion waits only for the request in flight,
+ * and outbox replays never overwrite a newer saved update.
+ */
+const lessonWrites = createLessonWriteQueue({
+  send: async (u) => {
+    let error: unknown;
+    const ok = await performUpsertLessonProgress(u.userId, u.courseId, u.lessonId, u.currentTimeSecs, u.watchPercentage, {
+      completed: u.completed,
+      noPosition: u.noPosition,
+      onError: (e) => { error = e; },
+    });
+    return { ok, error };
+  },
+  onSaved: (u, kind) => {
+    // A newer update was saved: drop/trim the matching outbox entry (M4).
+    progressOutbox.resolve(u).catch(() => {});
+    // Same 90% threshold as performUpsertLessonProgress: the lesson is now
+    // completed on the backend, so tab screens must reload on focus.
+    if (kind === 'save' && u.watchPercentage >= 90) markProgressChanged();
+  },
+  onFailed: (u, kind) => {
+    // M-17: never lose progress; retry from the persistent outbox later.
+    // (Completions are queued by markLessonComplete; replays are still queued.)
+    if (kind === 'save') progressOutbox.put(u).catch(() => {});
+  },
+});
 
 export function upsertLessonProgress(
   userId: string,
@@ -452,47 +502,9 @@ export function upsertLessonProgress(
   currentTimeSecs: number,
   watchPercentage: number,
 ): Promise<void> {
-  const cacheKey = lessonProgressCacheKey(userId, courseId, lessonId);
-
-  const update = { userId, courseId, lessonId, currentTimeSecs, watchPercentage };
-
-  const existingRequest = lessonProgressUpsertInFlight.get(cacheKey);
-  if (existingRequest) {
-    // Keep the newest playback position for processing after the current request.
-    pendingLessonProgressUpdates.set(cacheKey, update);
-    return existingRequest;
-  }
-
-  let request: Promise<void>;
-
-  request = (async () => {
-    let nextUpdate: typeof update | undefined = update;
-
-    while (nextUpdate) {
-      const ok = await performUpsertLessonProgress(
-        nextUpdate.userId,
-        nextUpdate.courseId,
-        nextUpdate.lessonId,
-        nextUpdate.currentTimeSecs,
-        nextUpdate.watchPercentage,
-      );
-      // M-17: never lose progress; retry from the persistent outbox later.
-      if (!ok) await progressOutbox.put(nextUpdate).catch(() => {});
-      // Same 90% threshold as performUpsertLessonProgress: the lesson is now
-      // completed on the backend, so tab screens must reload on focus.
-      else if (nextUpdate.watchPercentage >= 90) markProgressChanged();
-
-      nextUpdate = pendingLessonProgressUpdates.get(cacheKey);
-      pendingLessonProgressUpdates.delete(cacheKey);
-    }
-  })().finally(() => {
-    if (lessonProgressUpsertInFlight.get(cacheKey) === request) {
-      lessonProgressUpsertInFlight.delete(cacheKey);
-    }
-  });
-
-  lessonProgressUpsertInFlight.set(cacheKey, request);
-  return request;
+  return lessonWrites
+    .save({ userId, courseId, lessonId, currentTimeSecs, watchPercentage, at: Date.now() })
+    .then(() => undefined);
 }
 /**
  * Fetches course-level progress via GET /lesson-progress/my/course/:courseId
@@ -620,9 +632,17 @@ export async function fetchCourseLessonsProgressStrict(
  */
 export async function fetchRemoteProgress(
   userId: string,
-  opts?: { force?: boolean },
+  opts?: {
+    force?: boolean;
+    /**
+     * Rebuild only this course (after a lesson completion) instead of every
+     * enrolled course: one progress request instead of one per course.
+     */
+    onlyCourseId?: string;
+  },
 ): Promise<UserCourseProgress[]> {
   {
+    const { onlyCourseId, ...requestOpts } = opts ?? {};
     const { fetchEnrolledCourses } = require('@/services/enrollmentService');
     const enrollments = await fetchEnrolledCourses(userId);
 
@@ -633,6 +653,7 @@ export async function fetchRemoteProgress(
     for (const enrollment of enrollments) {
       const courseId = String(enrollment.course_id || enrollment.courses?.id);
       if (!courseId) continue;
+      if (onlyCourseId !== undefined && courseId !== String(onlyCourseId)) continue;
 
       let courseFetchFailed = false;
       const [modules, courseProgRes] = await Promise.all([
@@ -640,7 +661,7 @@ export async function fetchRemoteProgress(
           courseFetchFailed = true;
           return [] as any[];
         }),
-        courseRequests.courseProgress(userId, courseId, opts).catch(() => {
+        courseRequests.courseProgress(userId, courseId, requestOpts).catch(() => {
           courseFetchFailed = true;
           return null;
         }),
@@ -772,20 +793,49 @@ export async function fetchRemoteProgress(
 
 // ── M-17: persistent progress outbox (2026-11-10) ───────────────────────────
 const OUTBOX_KEY = 'progress_outbox_v1';
-export const progressOutbox = createProgressOutbox({
-  get: () => AsyncStorage.getItem(OUTBOX_KEY),
-  set: (v) => AsyncStorage.setItem(OUTBOX_KEY, v),
-});
+export const progressOutbox = createProgressOutbox(
+  {
+    get: () => AsyncStorage.getItem(OUTBOX_KEY),
+    set: (v) => AsyncStorage.setItem(OUTBOX_KEY, v),
+  },
+  undefined,
+  // Same order as the write queue: within this app session by sequence
+  // number, not by the device clock (lib/lessonWriteQueue.ts isNewerUpdate).
+  { isNewer: (a, b) => lessonWrites.isNewer(a, b) },
+);
 
-/** Re-send queued progress for this user (call on reconnect / app foreground / login). */
+let flushContinuation: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Re-send queued progress for this user (call on reconnect / app foreground /
+ * login). Review M5/M6 (lib/progressOutbox.ts runProgressFlush):
+ * - one flush at a time; paced (3 s apart, at most 6 per run);
+ * - stops at once on HTTP 429 and tries again once after Retry-After;
+ *   when the cap left entries queued, one follow-up flush after 60 s;
+ * - sent through the per-lesson write queue, so a newer saved update is never
+ *   overwritten by an older queued one;
+ * - never sent for another account: the owner is checked before every send
+ *   and each request refuses to go out with another account's token.
+ */
 export async function flushPendingProgress(userId: string | undefined | null): Promise<number> {
   if (!userId) return 0;
-  const sent = await progressOutbox.flush(userId, (u) =>
-    performUpsertLessonProgress(u.userId, u.courseId, u.lessonId, u.currentTimeSecs, u.watchPercentage, {
-      completed: u.completed,
-      noPosition: u.noPosition,
-    }),
-  );
-  if (sent > 0) markProgressChanged();
-  return sent;
+  if (flushContinuation) { clearTimeout(flushContinuation); flushContinuation = null; }
+  if (String(cacheManager.userScope().owner) !== String(userId)) return 0;
+  const report = await runProgressFlush({
+    outbox: progressOutbox,
+    userId,
+    currentOwner: () => cacheManager.userScope().owner,
+    replay: (u) => lessonWrites.replay(u as LessonUpdate),
+    isRateLimited: (e) => classifyApiError(e) === 'rate_limited',
+    retryAfterMs: (e) => parseRetryAfterMs((e as any)?.retryAfter ?? null, Date.now()),
+  });
+  if (report.sent > 0) markProgressChanged();
+  const delay = nextFlushDelayMs(report);
+  if (delay != null && !flushContinuation) {
+    flushContinuation = setTimeout(() => {
+      flushContinuation = null;
+      flushPendingProgress(userId).catch(() => {});
+    }, delay);
+  }
+  return report.sent;
 }
