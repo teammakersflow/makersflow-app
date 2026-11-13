@@ -36,7 +36,8 @@ import { useFavorites } from "@/context/FavoritesContext";
 import { useRequireAuth } from "@/context/AuthRequireContext";
 import { getCourseById, getCourseModules } from "@/services/courseDataProvider";
 import { enrollInCourse, getEnrollment, isExpired, clearEnrollmentCache } from "@/services/enrollmentService";
-import { fetchCourseLessonsProgress } from "@/lib/progressStorage";
+import { fetchCourseLessonsProgress, fetchCourseLessonsProgressStrict } from "@/lib/progressStorage";
+import { LoadErrorNotice } from "@/components/LoadErrorNotice";
 import { coursePercentage, isCourseCompleteFromLessons } from "@/lib/courseCompletion";
 import { fetchCourseReviews, fetchMyReview, upsertReview } from "@/services/reviewService";
 import { parseThumbnailUrls } from "@/lib/thumbnailUtils";
@@ -69,6 +70,8 @@ export default function CourseDetailScreen() {
   const [enrollment, setEnrollment] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isEnrolling, setIsEnrolling] = useState(false);
+  // Lesson progress could not be loaded (offline / API error).
+  const [progressLoadError, setProgressLoadError] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const isFavorite = course ? isFavoriteCourse(course.id) : false;
 
@@ -270,13 +273,18 @@ export default function CourseDetailScreen() {
           setEnrollment(enrollmentData);
 
           if (enrolledStatus) {
+            // Strict: a failed request must not show as "0 of N completed".
             const progressRes = await Promise.allSettled([
-              fetchCourseLessonsProgress(user.id, id),
+              fetchCourseLessonsProgressStrict(user.id, id),
             ]);
 
             if (cancelledRef.current) return;
             if (progressRes[0].status === 'fulfilled') {
               setLessonsProgress(progressRes[0].value);
+              setProgressLoadError(false);
+            } else {
+              // Keep any progress already shown; offer a retry.
+              setProgressLoadError(true);
             }
           }
         } else if (user?.id && enrollmentRes.status === 'rejected') {
@@ -694,7 +702,18 @@ export default function CourseDetailScreen() {
           {activeTab === "lessons" && (
             <View style={{ gap: 12 }}>
               {/* Progress */}
-              {isEnrolled && (
+              {isEnrolled && progressLoadError && (
+                <LoadErrorNotice
+                  message={
+                    lessonsProgress.length > 0
+                      ? "Couldn't refresh your progress. Showing what was last loaded."
+                      : "We couldn't load your progress for this course."
+                  }
+                  onRetry={onRefresh}
+                  retrying={refreshing}
+                />
+              )}
+              {isEnrolled && !(progressLoadError && lessonsProgress.length === 0) && (
                 <View style={[styles.progressCard, { backgroundColor: "#DCF7F4", borderColor: "#0B6FAD" }]}>
                   <View style={styles.progressHeader}>
                     <View>

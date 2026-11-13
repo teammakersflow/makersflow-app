@@ -14,6 +14,17 @@ export interface ProgressUpdate {
   currentTimeSecs: number;
   watchPercentage: number;
   at: number; // epoch ms when recorded
+  /**
+   * Manual "Mark complete" (2026-11-13). Sticky: once an entry for a lesson is
+   * a completion it stays one when newer playback updates are merged in, so a
+   * queued completion is never lost.
+   */
+  completed?: boolean;
+  /**
+   * The entry carries no playback position (a completion recorded without
+   * one). Replays must not overwrite the stored position or time spent.
+   */
+  noPosition?: boolean;
 }
 
 export interface OutboxStorage {
@@ -53,13 +64,32 @@ export function createProgressOutbox(storage: OutboxStorage, now: () => number =
   }
 
   return {
-    /** Keep the newest update for this lesson (never move backwards in time). */
+    /**
+     * Keep the newest update for this lesson (never move backwards in time).
+     * A completion is sticky across merges, and a position-less entry keeps
+     * the newest known position.
+     */
     put(u: Omit<ProgressUpdate, "at"> & { at?: number }) {
       return serial(async () => {
         const map = await load();
         const entry: ProgressUpdate = { ...u, at: u.at ?? now() };
         const prev = map[keyOf(entry)];
-        if (!prev || prev.at <= entry.at) map[keyOf(entry)] = entry;
+        let next: ProgressUpdate;
+        if (!prev) {
+          next = entry;
+        } else {
+          const newer = prev.at <= entry.at ? entry : prev;
+          const older = newer === entry ? prev : entry;
+          next = { ...newer };
+          if (newer.noPosition && !older.noPosition) {
+            next.currentTimeSecs = older.currentTimeSecs;
+            next.watchPercentage = older.watchPercentage;
+            delete next.noPosition;
+          }
+          if (prev.completed || entry.completed) next.completed = true;
+        }
+        if (!next.completed) delete next.completed;
+        map[keyOf(entry)] = next;
         await save(map);
       });
     },

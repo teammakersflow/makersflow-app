@@ -37,6 +37,7 @@ import { homeRepository, EMPTY_HOME_DATA } from "@/repositories/homeRepository";
 import { useNetwork } from "@/context/NetworkContext";
 import { useTabSwipe } from "@/hooks/useTabSwipe";
 import { getProgressVersion } from "@/lib/courseCompletion";
+import { LoadErrorNotice } from "@/components/LoadErrorNotice";
 
 const CATEGORY_DETAILS = [
   { name: "Robotics", icon: "construct", desc: "Build & program smart autonomous robots", btnText: "Start Now", btnColor: "#0B6FAD", textColor: "#FFF" },
@@ -142,7 +143,9 @@ function HeroResumeCard({ item }: { item: any }) {
   const colors = useColors();
   if (!item) return null;
 
-  const pct = item.videoProgress?.watchedPercentage ?? item.courseProgress ?? 0;
+  // "% completed" is the course's progress; the resume lesson itself may be
+  // new (0% watched) when the learner just finished the previous lesson.
+  const pct = item.courseProgress ?? item.videoProgress?.watchedPercentage ?? 0;
   const roundedPct = Math.min(100, Math.max(0, Math.round(pct)));
 
   return (
@@ -195,7 +198,7 @@ function HeroResumeCard({ item }: { item: any }) {
           await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
           router.push({
             pathname: "/course/learn",
-            params: { courseId: item.courseId, moduleId: item.moduleId },
+            params: { courseId: item.courseId, moduleId: item.moduleId, lessonId: item.lessonId ?? item.moduleId },
           });
         }}
       >
@@ -267,7 +270,12 @@ export default function HomeScreen() {
   const [unreadNotifCount, setUnreadNotifCount] = useState(0);
   const [activeBannerIndex, setActiveBannerIndex] = useState(0);
   const bannerFlatListRef = useRef<any>(null);
-  const { refreshProgress } = useProgress();
+  const { refreshProgress, progressLoadFailed } = useProgress();
+  // Progress could not be loaded (offline / API error).
+  const [progressError, setProgressError] = useState(false);
+  // At least one real progress result has been shown (not just the zeros
+  // the screen starts with).
+  const [hasProgressData, setHasProgressData] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [longestStreak, setLongestStreak] = useState(0);
   const [totalLessonsCompleted, setTotalLessonsCompleted] = useState(0);
@@ -306,14 +314,22 @@ export default function HomeScreen() {
       setCourses(data.courses);
       setPopularCourses(data.popularCourses);
       setPopularKits(data.popularKits as Product[]);
-      setEnrolledCourses(data.progress.enrolledCourses);
-      setLearningStreak(data.progress.learningStreak);
-      setLongestStreak(data.progress.longestStreak);
-      setTotalLessonsCompleted(data.progress.totalLessonsCompleted);
-      setTotalHoursLearned(data.progress.totalHoursLearned);
+      // A failed progress request with nothing saved must not replace the
+      // stats with zeros; keep what is shown and flag the error.
+      const progressFailed = !!result.error && !!user?.id;
+      setProgressError(progressFailed);
+      if (!progressFailed || data.progress.enrolledCourses.length > 0) {
+        setEnrolledCourses(data.progress.enrolledCourses);
+        setLearningStreak(data.progress.learningStreak);
+        setLongestStreak(data.progress.longestStreak);
+        setTotalLessonsCompleted(data.progress.totalLessonsCompleted);
+        setTotalHoursLearned(data.progress.totalHoursLearned);
+        setHasProgressData(true);
+      }
       setUnreadNotifCount(data.unreadNotifCount);
     } catch (err) {
       console.error('[Home] loadData error:', err);
+      if (user?.id) setProgressError(true);
     } finally {
       setIsLoading(false);
     }
@@ -407,6 +423,8 @@ export default function HomeScreen() {
 
   // enrollments.completed_at is never set for students, so it cannot be the
   // only signal; isCompleted follows the backend lesson rule.
+  // Failed with nothing loaded yet: show "–", not zeros that look real.
+  const statsUnknown = progressError && !hasProgressData;
   const completedCount = enrolledCourses.filter((p) =>
     typeof p.isCompleted === "boolean" ? p.isCompleted : p.completedAt != null,
   ).length;
@@ -492,22 +510,36 @@ export default function HomeScreen() {
           <View style={[styles.statsBanner, { backgroundColor: "#0B6FAD" }]}>
             <View style={styles.statItem}>
               <Ionicons name="book" size={20} color="#FFF" style={{ marginBottom: 4 }} />
-              <Text style={styles.statNumber}>{enrolledCourses.length}</Text>
+              <Text style={styles.statNumber}>{statsUnknown ? "–" : enrolledCourses.length}</Text>
               <Text style={styles.statLabel}>Courses Enrolled</Text>
             </View>
             <View style={styles.statDivider} />
             <View style={styles.statItem}>
               <Ionicons name="checkmark-circle" size={20} color="#FFF" style={{ marginBottom: 4 }} />
-              <Text style={styles.statNumber}>{completedCount}</Text>
+              <Text style={styles.statNumber}>{statsUnknown ? "–" : completedCount}</Text>
               <Text style={styles.statLabel}>Courses Completed</Text>
             </View>
             <View style={styles.statDivider} />
             <View style={styles.statItem}>
               <Ionicons name="trending-up" size={20} color="#FFF" style={{ marginBottom: 4 }} />
-              <Text style={styles.statNumber}>{avgProgress}%</Text>
+              <Text style={styles.statNumber}>{statsUnknown ? "–" : `${avgProgress}%`}</Text>
               <Text style={styles.statLabel}>Average Progress</Text>
             </View>
           </View>
+
+          {(progressError || progressLoadFailed) && (
+            <View style={{ marginHorizontal: 20, marginTop: -12, marginBottom: 20 }}>
+              <LoadErrorNotice
+                message={
+                  statsUnknown
+                    ? "We couldn't load your progress. Check your connection and try again."
+                    : "Couldn't refresh your progress. Showing what was last loaded."
+                }
+                onRetry={onRefresh}
+                retrying={refreshing}
+              />
+            </View>
+          )}
 
           {/* Learning Streak Card & mini bar chart */}
           <StreakCarousel

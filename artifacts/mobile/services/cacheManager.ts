@@ -36,6 +36,12 @@ export interface RepositoryResult<T> {
    * The data is still useful but a background refresh is desirable.
    */
   stale: boolean;
+  /**
+   * True when fetching the user's data failed (offline, timeout, API error).
+   * `data` is then whatever was saved (possibly empty) and must not be shown
+   * as a genuine empty result: screens show an error/retry state instead.
+   */
+  error?: boolean;
   /** ISO 8601 timestamp of when the cache was last written. Null for network responses. */
   updatedAt: string | null;
 }

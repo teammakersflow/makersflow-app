@@ -21,6 +21,7 @@ import { getCourseModules } from "@/services/courseDataProvider";
 import { fetchEnrolledCourses } from "@/services/enrollmentService";
 import { fetchCourseProgress } from "@/lib/progressStorage";
 import { fetchMyCertificatesStrict, type Certificate } from "@/services/certificateService";
+import { resolveCompletionDate } from "@/lib/courseCompletion";
 import { TEXT_STYLES, TYPOGRAPHY } from "@/constants/typography";
 import { AchievementsSkeleton } from "@/components/SkeletonLoader";
 
@@ -137,9 +138,12 @@ export default function AchievementsScreen() {
         }
         if (!hasLoadedOnce.current) setIsLoading(true);
         try {
+          // Certificate issue dates are the stable "first completed" dates.
+          const certIssuedAt = new Map<string, string>();
           try {
             const certificates = await fetchMyCertificatesStrict();
             setIssuedCertificates(certificates);
+            certificates.forEach((c) => certIssuedAt.set(String(c.course_id), c.issued_at));
           } catch (certificateError) {
             console.error("[Achievements] certificate loading error:", certificateError);
           }
@@ -169,8 +173,12 @@ export default function AchievementsScreen() {
               results.push({
                 courseId,
                 courseTitle,
-                // completed_at is empty here; use when the last lesson was completed.
-                completedAt: prog.completedAt ?? null,
+                // First completion date: certificate issue date (never changes),
+                // else when the last lesson was completed.
+                completedAt: resolveCompletionDate({
+                  certificateIssuedAt: certIssuedAt.get(courseId),
+                  lessonCompletedAt: prog.completedAt,
+                }),
                 level,
                 instructor,
               });

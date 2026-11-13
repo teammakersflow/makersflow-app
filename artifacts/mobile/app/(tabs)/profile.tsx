@@ -32,6 +32,8 @@ import { announcementService } from "@/services/announcementService";
 import { getCourseModules } from "@/services/courseDataProvider";
 import { fetchEnrolledCourses } from "@/services/enrollmentService";
 import { fetchCourseProgress } from "@/lib/progressStorage";
+import { resolveCompletionDate } from "@/lib/courseCompletion";
+import { fetchMyCertificates } from "@/services/certificateService";
 import { ProductCard } from "@/components/ProductCard";
 import { CertificateSkeleton, WishlistSkeleton } from "@/components/SkeletonLoader";
 import { Product } from "@/data/mockData";
@@ -159,6 +161,9 @@ export default function ProfileScreen() {
           setIsValidLoaded(true);
 
           const results: CompletedCourse[] = [];
+          // Certificate issue dates are the stable "first completed" dates.
+          const certIssuedAt = new Map<string, string>();
+          (await fetchMyCertificates()).forEach((c) => certIssuedAt.set(String(c.course_id), c.issued_at));
 
           for (const enr of validEnrollments) {
             const courseId = String(enr.course_id || enr.courses?.id);
@@ -173,13 +178,17 @@ export default function ProfileScreen() {
 
             const prog = await fetchCourseProgress(user.id, courseId);
             if (prog.isCompleted) {
-              // No student API stamps completed_at (completeCourse never wrote
-              // it), so use when the last lesson was completed, not the
-              // enrollment date.
+              // No student API stamps completed_at, so use the certificate issue
+              // date (fixed at first completion), else when the last lesson
+              // was completed, never the enrollment date.
               results.push({
                 courseId,
                 courseTitle,
-                completedAt: prog.completedAt ?? enr.enrolled_at ?? '',
+                completedAt:
+                  resolveCompletionDate({
+                    certificateIssuedAt: certIssuedAt.get(courseId),
+                    lessonCompletedAt: prog.completedAt,
+                  }) ?? enr.enrolled_at ?? '',
                 level,
                 instructor,
               });
