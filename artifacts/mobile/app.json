@@ -2,7 +2,7 @@
   "expo": {
     "name": "MAKERSFLOW",
     "slug": "mobile",
-    "version": "1.0.9",
+    "version": "1.0.10",
     "orientation": "portrait",
     "icon": "./assets/images/logos/icon.png",
     "scheme": "makersflow",
@@ -80,7 +80,7 @@
         "android.permission.SCHEDULE_EXACT_ALARM",
         "android.permission.USE_EXACT_ALARM"
       ],
-      "versionCode": 19
+      "versionCode": 20
     },
     "web": {
       "bundler": "metro",
