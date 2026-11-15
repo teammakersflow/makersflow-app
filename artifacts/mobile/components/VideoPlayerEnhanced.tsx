@@ -23,6 +23,7 @@ import { SPACING } from "@/constants/spacing";
 import { PlaybackSpeedSelector } from "./PlaybackSpeedSelector";
 import { router } from "expo-router";
 import { createPlaybackTracker, type PlaybackEffects } from "@/lib/playbackTracker";
+import { createControlsVisibility, inlinePlayerHeight, type PlayerUiInputs } from "@/lib/videoPlayerUi";
 
 const devLog = (...args: any[]) => {
   if (__DEV__) console.log(...args);
@@ -230,6 +231,8 @@ export function VideoPlayerEnhanced({
 
   // FIX: Dynamic dimensions that update on orientation change
   const [screenDims, setScreenDims] = useState(Dimensions.get("window"));
+  // Width of the inline player box (its height is 16:9 of it, capped).
+  const [boxWidth, setBoxWidth] = useState(() => Dimensions.get("window").width);
 
   const isMounted = useRef(true);
   // M-20: save cadence, pause-save and one-shot completion (lib/playbackTracker.ts).
@@ -364,27 +367,40 @@ export function VideoPlayerEnhanced({
   const isPlayingRef = useRef(isPlaying);
   useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
 
+  // 2026-11-15: control visibility is driven by playback state
+  // (lib/videoPlayerUi.ts). Controls auto-hide only while the video is really
+  // playing; paused, loading, ended and error states keep them up. An
+  // interrupted fade can no longer unmount the buttons (token + finished).
+  const uiStateRef = useRef({ hasError: false, isRetrying: false, isStalled: false });
+  uiStateRef.current = { hasError, isRetrying, isStalled };
+  const uiInputs = (): PlayerUiInputs => ({
+    status: lastStatusRef.current,
+    isPlaying: isPlayingRef.current,
+    ...uiStateRef.current,
+  });
+  const controlsRef = useRef<ReturnType<typeof createControlsVisibility> | null>(null);
+  if (!controlsRef.current) {
+    controlsRef.current = createControlsVisibility({
+      setTimer: (fn, ms) => setTimeout(fn, ms),
+      clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+      render: (visible, token, fadeMs) => {
+        if (!isMounted.current) return;
+        if (visible) {
+          setShowControls(true);
+          Animated.timing(overlayOpacity, { toValue: 1, duration: 100, useNativeDriver: true }).start();
+          return;
+        }
+        Animated.timing(overlayOpacity, { toValue: 0, duration: fadeMs, useNativeDriver: true }).start(({ finished }) => {
+          if (isMounted.current && controlsRef.current?.commitHidden(token, finished)) setShowControls(false);
+        });
+      },
+    });
+  }
+  const controls = controlsRef.current;
+
   const showControlsWithTimer = useCallback(() => {
     if (!isMounted.current) return;
-    setShowControls(true);
-    Animated.timing(overlayOpacity, {
-      toValue: 1,
-      duration: 100,
-      useNativeDriver: true,
-    }).start();
-
-    if (hideTimer.current) clearTimeout(hideTimer.current);
-
-    hideTimer.current = setTimeout(() => {
-      if (!isMounted.current) return;
-      Animated.timing(overlayOpacity, {
-        toValue: 0,
-        duration: 350, // Slowly vanish over 350ms
-        useNativeDriver: true,
-      }).start(() => {
-        if (isMounted.current) setShowControls(false);
-      });
-    }, 2500); // 2.5 sec delay
+    controls.show(uiInputs());
   }, []);
 
   // Stable refs for callbacks so the polling interval never needs to be
@@ -503,10 +519,11 @@ export function VideoPlayerEnhanced({
     return () => { sub.remove(); save(); };
   }, []);
 
-  // Auto-hide effect
+  // Show / keep / auto-hide the controls whenever playback state changes:
+  // ready, playing, paused, buffering, error, retrying, stalled.
   useEffect(() => {
-    showControlsWithTimer();
-  }, [isPlaying]);
+    controls.update(uiInputs());
+  }, [isPlaying, lastStatus, hasError, isRetrying, isStalled]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -514,6 +531,7 @@ export function VideoPlayerEnhanced({
       if (hideTimer.current) {
         clearTimeout(hideTimer.current);
       }
+      controls.dispose();
     };
   }, []);
 
@@ -562,18 +580,8 @@ export function VideoPlayerEnhanced({
   // Single tap only toggles controls visibility.
   // Play/pause is handled exclusively by the explicit buttons (Bug 1).
   const handleVideoTap = () => {
-    if (!showControls) {
-      showControlsWithTimer();
-    } else {
-      if (hideTimer.current) clearTimeout(hideTimer.current);
-      Animated.timing(overlayOpacity, {
-        toValue: 0,
-        duration: 100,
-        useNativeDriver: true,
-      }).start(() => {
-        if (isMounted.current) setShowControls(false);
-      });
-    }
+    if (!isMounted.current) return;
+    controls.toggle(uiInputs());
   };
 
   const [showLeftIndicator, setShowLeftIndicator] = useState(false);
@@ -735,14 +743,14 @@ export function VideoPlayerEnhanced({
   };
 
   const handleSliderStart = () => {
-    // Show controls when starting to drag
-    showControlsWithTimer();
+    // Keep the controls up for the whole drag.
+    controls.hold(uiInputs());
   };
 
   const handleSliderComplete = async () => {
+    controls.release(uiInputs());
     // Haptic feedback when done dragging
     await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    showControlsWithTimer();
   };
 
   const toggleFullscreen = async () => {
@@ -899,7 +907,7 @@ export function VideoPlayerEnhanced({
         pointerEvents={showControls || isScrubbing ? "box-none" : "none"}
       >
         {/* Top Bar */}
-        <View style={styles.topBar} pointerEvents="auto">
+        <View style={isFullscreen ? styles.topBar : styles.topBarEmpty} pointerEvents="auto">
           {isFullscreen && (
             <Pressable
               onPress={handleBackPress}
@@ -918,7 +926,7 @@ export function VideoPlayerEnhanced({
             <View style={styles.centerPlaybackButtons}>
               <Pressable onPress={skipBackward} style={styles.centerPlayPauseBtn}>
                 <Feather name="rotate-ccw" size={22} color="#FFF" />
-                <Text style={{ color: "#FFF", fontSize: 9, fontWeight: "bold", marginTop: 2 }}>10s</Text>
+                <Text maxFontSizeMultiplier={1.2} style={{ color: "#FFF", fontSize: 9, fontWeight: "bold", marginTop: 2 }}>10s</Text>
               </Pressable>
 
               <Pressable onPress={togglePlayPause} style={[styles.centerPlayPauseBtn, { width: 70, height: 70, borderRadius: 35 }]}>
@@ -927,7 +935,7 @@ export function VideoPlayerEnhanced({
 
               <Pressable onPress={skipForward} style={styles.centerPlayPauseBtn}>
                 <Feather name="rotate-cw" size={22} color="#FFF" />
-                <Text style={{ color: "#FFF", fontSize: 9, fontWeight: "bold", marginTop: 2 }}>10s</Text>
+                <Text maxFontSizeMultiplier={1.2} style={{ color: "#FFF", fontSize: 9, fontWeight: "bold", marginTop: 2 }}>10s</Text>
               </Pressable>
             </View>
           )}
@@ -975,7 +983,7 @@ export function VideoPlayerEnhanced({
                   />
                 )}
 
-                <Text style={[styles.timeText, { marginLeft: 4 }]}>
+                <Text maxFontSizeMultiplier={1.3} numberOfLines={1} style={[styles.timeText, { marginLeft: 4 }]}>
                   {formatTime(currentTime)} / {formatTime(duration)}
                 </Text>
               </View>
@@ -1002,7 +1010,13 @@ export function VideoPlayerEnhanced({
   return (
     <>
       {/* Normal View */}
-      <View style={styles.container}>
+      <View
+        style={[styles.container, { height: inlinePlayerHeight(boxWidth) }]}
+        onLayout={(e) => {
+          const w = e.nativeEvent.layout.width;
+          if (w > 0 && Math.abs(w - boxWidth) >= 1) setBoxWidth(w);
+        }}
+      >
         <Pressable
           ref={videoContainerRef}
           style={styles.videoContainer}
@@ -1015,6 +1029,7 @@ export function VideoPlayerEnhanced({
             nativeControls={false}
             contentFit="cover"
             allowsPictureInPicture={false}
+            surfaceType="textureView"
           />
           <View style={StyleSheet.absoluteFill} />
           
@@ -1068,6 +1083,7 @@ export function VideoPlayerEnhanced({
                 nativeControls={false}
                 contentFit="cover"
                 allowsPictureInPicture={false}
+                surfaceType="textureView"
               />
               <View style={StyleSheet.absoluteFill} />
               
@@ -1102,10 +1118,10 @@ export function VideoPlayerEnhanced({
 const styles = StyleSheet.create({
   container: {
     width: "100%",
-    aspectRatio: 16 / 9,
+    // Height is set inline: inlinePlayerHeight(width) (16:9, capped at 220).
     backgroundColor: "#000",
     position: "relative",
-    overflow: "visible",
+    overflow: "hidden",
   },
   videoContainer: {
     flex: 1,
@@ -1248,6 +1264,9 @@ const styles = StyleSheet.create({
   topBar: {
     padding: 12,
     alignItems: "flex-start",
+  },
+  topBarEmpty: {
+    height: 0,
   },
   bottomWrapper: {
     width: "100%",
