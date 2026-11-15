@@ -23,7 +23,20 @@ import { SPACING } from "@/constants/spacing";
 import { PlaybackSpeedSelector } from "./PlaybackSpeedSelector";
 import { router } from "expo-router";
 import { createPlaybackTracker, type PlaybackEffects } from "@/lib/playbackTracker";
-import { createControlsVisibility, inlinePlayerHeight, type PlayerUiInputs } from "@/lib/videoPlayerUi";
+import {
+  clampedSeekTarget,
+  createControlsVisibility,
+  createTapClassifier,
+  inlinePlayerHeight,
+  playPauseAction,
+  type PlayerUiInputs,
+  type TapSide,
+} from "@/lib/videoPlayerUi";
+
+/** Haptics are feedback only: never let a slow or failing call block an action. */
+const haptic = (style: Haptics.ImpactFeedbackStyle) => {
+  Haptics.impactAsync(style).catch(() => {});
+};
 
 const devLog = (...args: any[]) => {
   if (__DEV__) console.log(...args);
@@ -183,7 +196,7 @@ export function VideoPlayerEnhanced({
   const barWidth = useRef(0);
 
   const toggleMute = async () => {
-    await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    haptic(Haptics.ImpactFeedbackStyle.Light);
     if (!player) return;
     player.muted = !player.muted;
     setIsMuted(player.muted);
@@ -225,7 +238,7 @@ export function VideoPlayerEnhanced({
       duration: 150,
       useNativeDriver: false,
     }).start();
-    await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    haptic(Haptics.ImpactFeedbackStyle.Light);
     showControlsWithTimer();
   };
 
@@ -588,85 +601,89 @@ export function VideoPlayerEnhanced({
   const [showRightIndicator, setShowRightIndicator] = useState(false);
   const leftIndicatorTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const rightIndicatorTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastTap = useRef(0);
-  const singleTapTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const videoWidth = useRef(0);
 
-  const handleVideoPress = async (event: any) => {
-    const now = Date.now();
-    const DOUBLE_TAP_DELAY = 300;
-    const locationX = event.nativeEvent.locationX;
-    const containerW = videoWidth.current || screenDims.width;
-    const isLeft = locationX < containerW / 2;
-
-    if (now - lastTap.current < DOUBLE_TAP_DELAY) {
-      // Double tap detected!
-      if (singleTapTimeout.current) {
-        clearTimeout(singleTapTimeout.current);
-        singleTapTimeout.current = null;
-      }
-
-      if (isLeft) {
-        // Seek backward 10s
-        player.seekBy(-10);
-        setCurrentTime(Math.max(0, currentTime - 10));
-        await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-
-        // Show indicator
-        setShowLeftIndicator(true);
-        if (leftIndicatorTimeout.current) clearTimeout(leftIndicatorTimeout.current);
-        leftIndicatorTimeout.current = setTimeout(() => {
-          setShowLeftIndicator(false);
-        }, 800);
-      } else {
-        // Seek forward 10s
-        if (duration > 0) {
-          player.seekBy(10);
-          setCurrentTime(Math.min(duration, currentTime + 10));
-          await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-
-          // Show indicator
-          setShowRightIndicator(true);
-          if (rightIndicatorTimeout.current) clearTimeout(rightIndicatorTimeout.current);
-          rightIndicatorTimeout.current = setTimeout(() => {
-            setShowRightIndicator(false);
-          }, 800);
-        }
-      }
-    } else {
-      // Schedule single tap action
-      singleTapTimeout.current = setTimeout(() => {
-        handleVideoTap();
-        singleTapTimeout.current = null;
-      }, DOUBLE_TAP_DELAY);
+  // Seeks relative to the player's real position (not the 0.5 s-old React
+  // state), clamped to [0, duration] (lib/videoPlayerUi.ts).
+  const seekBySeconds = (delta: number): boolean => {
+    if (!isMounted.current || !player) return false;
+    try {
+      const target = clampedSeekTarget(Number(player.currentTime), delta, Number(player.duration) || duration);
+      if (target === null) return false;
+      player.currentTime = target;
+      setCurrentTime(target);
+      return true;
+    } catch (err) {
+      devError("[VideoPlayer] Seek failed:", err);
+      return false;
     }
-    lastTap.current = now;
   };
 
-  const togglePlayPause = async () => {
-    if (singleTapTimeout.current) {
-      clearTimeout(singleTapTimeout.current);
-      singleTapTimeout.current = null;
+  const flashSeekIndicator = (side: TapSide) => {
+    if (side === "left") {
+      setShowLeftIndicator(true);
+      if (leftIndicatorTimeout.current) clearTimeout(leftIndicatorTimeout.current);
+      leftIndicatorTimeout.current = setTimeout(() => setShowLeftIndicator(false), 800);
+    } else {
+      setShowRightIndicator(true);
+      if (rightIndicatorTimeout.current) clearTimeout(rightIndicatorTimeout.current);
+      rightIndicatorTimeout.current = setTimeout(() => setShowRightIndicator(false), 800);
     }
-    await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+  };
+
+  // Single tap: toggle the controls. Double tap: seek 10 s on that side.
+  // Callbacks go through refs so the classifier (created once) never calls
+  // a stale render's handlers.
+  const tapHandlersRef = useRef({ single: () => {}, double: (_side: TapSide) => {} });
+  tapHandlersRef.current = {
+    single: () => handleVideoTap(),
+    double: (side: TapSide) => {
+      if (seekBySeconds(side === "left" ? -10 : 10)) {
+        haptic(Haptics.ImpactFeedbackStyle.Medium);
+        flashSeekIndicator(side);
+      }
+    },
+  };
+  const tapClassifierRef = useRef<ReturnType<typeof createTapClassifier> | null>(null);
+  if (!tapClassifierRef.current) {
+    tapClassifierRef.current = createTapClassifier({
+      setTimer: (fn, ms) => setTimeout(fn, ms),
+      clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+      now: () => Date.now(),
+      onSingle: () => { if (isMounted.current) tapHandlersRef.current.single(); },
+      onDouble: (side) => { if (isMounted.current) tapHandlersRef.current.double(side); },
+    });
+  }
+  const tapClassifier = tapClassifierRef.current;
+  useEffect(() => () => tapClassifier.cancel(), [tapClassifier]);
+
+  const handleVideoPress = (event: any) => {
+    const locationX = Number(event?.nativeEvent?.locationX);
+    const containerW = videoWidth.current || screenDims.width;
+    tapClassifier.press(Number.isFinite(locationX) && locationX < containerW / 2 ? "left" : "right");
+  };
+
+  const togglePlayPause = () => {
+    tapClassifier.cancel(); // a control press is not a surface tap
+    haptic(Haptics.ImpactFeedbackStyle.Light);
     if (!isMounted.current || !player) return;
 
     try {
       // Read ground truth from player directly — never from stale React state
-      const currentlyPlaying = player.playing;
-      devLog("[VideoPlayer][DIAG] Play/Pause pressed", {
-        playingBefore: currentlyPlaying,
-        status: player.status,
-        currentTime: player.currentTime,
-      });
-      const isAtEnd = duration > 0 && player.currentTime >= duration - 0.5;
+      // (lib/videoPlayerUi.ts playPauseAction).
+      const action = playPauseAction(
+        player.playing,
+        Number(player.currentTime),
+        Number(player.duration) || duration,
+      );
+      devLog("[VideoPlayer][DIAG] Play/Pause pressed", { action, status: player.status });
 
-      if (currentlyPlaying) {
+      if (action === "pause") {
         player.pause();
         setIsPlaying(false);
         isPlayingRef.current = false;
       } else {
-        if (isAtEnd) {
+        if (action === "restart") {
           player.currentTime = 0;
           trackerRef.current.reset();
         }
@@ -684,31 +701,18 @@ export function VideoPlayerEnhanced({
     }
   };
 
-  const skipForward = async () => {
-    await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    if (!isMounted.current || !player) return;
-    if (!duration || duration <= 0 || !isFinite(duration)) return;
-
-    try {
-      player.seekBy(10);
-      setCurrentTime(Math.min(duration, currentTime + 10));
-      showControlsWithTimer();
-    } catch (err) {
-      devError("[VideoPlayer] Failed skipForward:", err);
-    }
+  const skipForward = () => {
+    tapClassifier.cancel();
+    haptic(Haptics.ImpactFeedbackStyle.Light);
+    seekBySeconds(10);
+    showControlsWithTimer(); // interaction: restart the auto-hide timer
   };
 
-  const skipBackward = async () => {
-    await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    if (!isMounted.current || !player) return;
-
-    try {
-      player.seekBy(-10);
-      setCurrentTime(Math.max(0, currentTime - 10));
-      showControlsWithTimer();
-    } catch (err) {
-      devError("[VideoPlayer] Failed skipBackward:", err);
-    }
+  const skipBackward = () => {
+    tapClassifier.cancel();
+    haptic(Haptics.ImpactFeedbackStyle.Light);
+    seekBySeconds(-10);
+    showControlsWithTimer();
   };
 
   const handleSpeedChange = async (speed: number) => {
@@ -750,11 +754,11 @@ export function VideoPlayerEnhanced({
   const handleSliderComplete = async () => {
     controls.release(uiInputs());
     // Haptic feedback when done dragging
-    await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    haptic(Haptics.ImpactFeedbackStyle.Light);
   };
 
   const toggleFullscreen = async () => {
-    await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    haptic(Haptics.ImpactFeedbackStyle.Medium);
 
     try {
       if (Platform.OS === "web") {
@@ -966,7 +970,14 @@ export function VideoPlayerEnhanced({
                   <Feather name={isPlaying ? "pause" : "play"} size={22} color="#FFF" />
                 </Pressable>
 
-                <Pressable onPress={() => setShowVolumeBar(!showVolumeBar)} style={styles.controlBtn}>
+                <Pressable
+                  onPress={() => {
+                    tapClassifier.cancel();
+                    setShowVolumeBar(!showVolumeBar);
+                    showControlsWithTimer();
+                  }}
+                  style={styles.controlBtn}
+                >
                   <Feather name={isMuted || volume === 0 ? "volume-x" : volume < 0.5 ? "volume-1" : "volume-2"} size={20} color="#FFF" />
                 </Pressable>
 
@@ -980,6 +991,8 @@ export function VideoPlayerEnhanced({
                     maximumTrackTintColor="rgba(255,255,255,0.3)"
                     thumbTintColor="#FFFFFF"
                     onValueChange={handleVolumeChange}
+                    onSlidingStart={() => controls.hold(uiInputs())}
+                    onSlidingComplete={() => controls.release(uiInputs())}
                   />
                 )}
 
@@ -1031,7 +1044,14 @@ export function VideoPlayerEnhanced({
             allowsPictureInPicture={false}
             surfaceType="textureView"
           />
-          <View style={StyleSheet.absoluteFill} />
+          {/* Tap catcher over the video. collapsable={false} is required: under
+              the New Architecture a style-only View is flattened away. Taps then
+              land on expo-video's native VideoView, which consumes them and
+              dispatches its own touch stream to JS while React Native's root
+              dispatches another for the same tap, so the surface handler could
+              see one tap as two (a double tap = seek) or lose it. With a real
+              native view here, taps take React Native's single standard path. */}
+          <View style={StyleSheet.absoluteFill} collapsable={false} />
           
           {/* Double Tap Seek Indicators */}
           {showLeftIndicator && (
@@ -1085,7 +1105,8 @@ export function VideoPlayerEnhanced({
                 allowsPictureInPicture={false}
                 surfaceType="textureView"
               />
-              <View style={StyleSheet.absoluteFill} />
+              {/* Tap catcher (see the inline player): must stay a native view. */}
+              <View style={StyleSheet.absoluteFill} collapsable={false} />
               
               {/* Double Tap Seek Indicators */}
               {showLeftIndicator && (

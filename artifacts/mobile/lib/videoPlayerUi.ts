@@ -142,3 +142,91 @@ export function createControlsVisibility(deps: ControlsVisibilityDeps) {
     },
   };
 }
+
+// ── Taps on the video surface (2026-11-15, touch-controls fix) ──────────────
+
+export const DOUBLE_TAP_MS = 300;
+/**
+ * Two press events closer than this cannot come from two human taps. They are
+ * one tap delivered twice (e.g. once by React Native's root and once by
+ * expo-video's native view, which re-dispatches touches it receives), and
+ * must not be mistaken for a double tap that seeks instead of showing the
+ * controls.
+ */
+export const DUPLICATE_TAP_MS = 60;
+
+export type TapSide = "left" | "right";
+
+export interface TapClassifierDeps {
+  setTimer: (fn: () => void, ms: number) => unknown;
+  clearTimer: (handle: unknown) => void;
+  now: () => number;
+  /** A single tap (no second tap followed within DOUBLE_TAP_MS). */
+  onSingle: () => void;
+  /** A double tap on one side of the video. */
+  onDouble: (side: TapSide) => void;
+}
+
+/**
+ * Classifies presses on the video surface: single tap (toggle the controls,
+ * after DOUBLE_TAP_MS so a double tap can still be detected) or double tap
+ * (seek). Duplicate deliveries of one tap are ignored. cancel() drops a
+ * pending single tap (a control button was pressed, or the player unmounts).
+ */
+export function createTapClassifier(deps: TapClassifierDeps) {
+  let lastTapAt = -Infinity;
+  let pending: unknown = null;
+
+  const cancel = () => {
+    if (pending !== null) deps.clearTimer(pending);
+    pending = null;
+  };
+
+  return {
+    press(side: TapSide) {
+      const t = deps.now();
+      const gap = t - lastTapAt;
+      if (gap < DUPLICATE_TAP_MS) return "duplicate" as const;
+      if (pending !== null && gap < DOUBLE_TAP_MS) {
+        cancel();
+        lastTapAt = -Infinity; // a third tap starts over (no chained doubles)
+        deps.onDouble(side);
+        return "double" as const;
+      }
+      cancel();
+      lastTapAt = t;
+      pending = deps.setTimer(() => {
+        pending = null;
+        deps.onSingle();
+      }, DOUBLE_TAP_MS);
+      return "single-pending" as const;
+    },
+    cancel,
+    hasPending: () => pending !== null,
+  };
+}
+
+/**
+ * What the play/pause button does, decided from the player's real state (not
+ * React state, which can lag): pause when playing; otherwise play, restarting
+ * from 0 when the video is at (or within 0.5 s of) its end.
+ */
+export function playPauseAction(playing: boolean, currentTime: number, duration: number): "pause" | "play" | "restart" {
+  if (playing) return "pause";
+  const atEnd = Number.isFinite(duration) && duration > 0 && Number.isFinite(currentTime) && currentTime >= duration - 0.5;
+  return atEnd ? "restart" : "play";
+}
+
+/**
+ * Target time for a relative seek, clamped to the video: never before 0 and
+ * never past the end (a small margin keeps "forward" from ending the video by
+ * accident). Returns null when the seek cannot be done (unknown duration for
+ * a forward seek, or invalid input).
+ */
+export function clampedSeekTarget(current: number, delta: number, duration: number): number | null {
+  if (!Number.isFinite(current) || !Number.isFinite(delta)) return null;
+  const hasDuration = Number.isFinite(duration) && duration > 0;
+  if (delta > 0 && !hasDuration) return null;
+  const end = hasDuration ? Math.max(0, duration - 0.5) : Infinity;
+  return Math.min(end, Math.max(0, current + delta));
+}
