@@ -13,11 +13,17 @@ import {
   AUTO_HIDE_MS,
   FADE_OUT_MS,
   TAP_FADE_OUT_MS,
+  DOUBLE_TAP_MS,
+  DUPLICATE_TAP_MS,
   activeOverlay,
+  clampedSeekTarget,
   createControlsVisibility,
+  createTapClassifier,
   inlinePlayerHeight,
+  playPauseAction,
   shouldAutoHide,
   type PlayerUiInputs,
+  type TapSide,
 } from "../lib/videoPlayerUi.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -266,7 +272,8 @@ describe("player wiring (source)", () => {
   });
 
   test("touch layering is unchanged: a catcher view sits over the video; the overlay ignores touches only when hidden", () => {
-    assert.equal((p.match(/<View style=\{StyleSheet\.absoluteFill\} \/>/g) ?? []).length, 2);
+    // 2026-11-15 touch fix: the catcher must be a real native view (see "touch wiring").
+    assert.equal((p.match(/<View style=\{StyleSheet\.absoluteFill\} collapsable=\{false\} \/>/g) ?? []).length, 2);
     assert.match(p, /pointerEvents=\{showControls \|\| isScrubbing \? "box-none" : "none"\}/);
     assert.match(p, /\{showControls && \(\s*<View style=\{styles\.centerPlaybackButtons\}>/);
   });
@@ -288,5 +295,312 @@ describe("player wiring (source)", () => {
     assert.equal((learn.match(/onProgressUpdate=\{handleProgressUpdate\}/g) ?? []).length, 2);
     assert.match(learn, /onRefreshVideoUrl=\{refreshActiveSignedUrl\}/);
     assert.match(learn, /'Mark Lesson Complete'/);
+  });
+});
+
+// ── Touch controls (2026-11-15): taps on the video must bring the controls back ──
+describe("taps on the video surface", () => {
+  function taps() {
+    let now = 1_000;
+    const timers: Array<{ at: number; fn: () => void; live: boolean }> = [];
+    const events: string[] = [];
+    const c = createTapClassifier({
+      now: () => now,
+      setTimer: (fn, ms) => { const t = { at: now + ms, fn, live: true }; timers.push(t); return t; },
+      clearTimer: (h: any) => { h.live = false; },
+      onSingle: () => events.push("single"),
+      onDouble: (side: TapSide) => events.push(`double-${side}`),
+    });
+    return {
+      c,
+      events,
+      advance(ms: number) {
+        now += ms;
+        for (const t of timers.filter((x) => x.live && x.at <= now)) { t.live = false; t.fn(); }
+      },
+    };
+  }
+
+  test("one tap = one single tap (toggles the controls) after the double-tap window", () => {
+    const t = taps();
+    t.c.press("right");
+    t.advance(DOUBLE_TAP_MS - 1);
+    assert.deepEqual(t.events, [], "not before the window closes");
+    t.advance(1);
+    assert.deepEqual(t.events, ["single"]);
+  });
+
+  test("ROOT-CAUSE REGRESSION: one tap delivered twice (native + root dispatch) is still a single tap, never a seek", () => {
+    for (const gap of [0, 1, 5, 16, 30, DUPLICATE_TAP_MS - 1]) {
+      const t = taps();
+      t.c.press("right");
+      t.advance(gap);
+      assert.equal(t.c.press("right"), "duplicate", `gap ${gap} ms`);
+      t.advance(DOUBLE_TAP_MS);
+      assert.deepEqual(t.events, ["single"], `gap ${gap} ms`);
+    }
+  });
+
+  test("a real double tap seeks on the tapped side and does not also toggle the controls", () => {
+    for (const side of ["left", "right"] as const) {
+      const t = taps();
+      t.c.press(side);
+      t.advance(150);
+      assert.equal(t.c.press(side), "double");
+      t.advance(1_000);
+      assert.deepEqual(t.events, [`double-${side}`]);
+    }
+  });
+
+  test("taps slower than the window are separate single taps (show, then hide)", () => {
+    const t = taps();
+    t.c.press("left");
+    t.advance(DOUBLE_TAP_MS + 200);
+    t.c.press("left");
+    t.advance(DOUBLE_TAP_MS);
+    assert.deepEqual(t.events, ["single", "single"]);
+  });
+
+  test("a third quick tap does not chain into another seek", () => {
+    const t = taps();
+    t.c.press("right"); t.advance(120);
+    t.c.press("right"); t.advance(120); // double
+    t.c.press("right"); t.advance(DOUBLE_TAP_MS);
+    assert.deepEqual(t.events, ["double-right", "single"]);
+  });
+
+  test("pressing a control cancels a pending surface tap (no accidental toggle)", () => {
+    const t = taps();
+    t.c.press("right");
+    t.advance(100);
+    t.c.cancel(); // e.g. togglePlayPause / skip / volume
+    t.advance(DOUBLE_TAP_MS);
+    assert.deepEqual(t.events, []);
+    assert.equal(t.c.hasPending(), false);
+  });
+
+  test("with the controls hidden during playback, a tap brings them back; a tap while visible hides them", () => {
+    const h = harness();
+    const t = createTapClassifier({
+      now: (() => { let n = 0; return () => (n += 400); })(), // taps 400 ms apart
+      setTimer: (fn) => { fn(); return 1; }, // fire the single tap immediately for this check
+      clearTimer: () => {},
+      onSingle: () => h.c.toggle(ui({ status: "readyToPlay", isPlaying: true })),
+      onDouble: () => assert.fail("must not seek"),
+    });
+    h.c.update(ui({ status: "readyToPlay", isPlaying: true }));
+    h.advance(AUTO_HIDE_MS);
+    h.finishFades();
+    assert.equal(h.mounted, false, "auto-hidden while playing");
+    t.press("right");
+    assert.equal(h.usable, true, "tap shows the controls");
+    t.press("right");
+    h.finishFades();
+    assert.equal(h.mounted, false, "next tap hides them");
+  });
+});
+
+describe("control interactions and the auto-hide timer", () => {
+  test("every control interaction restarts the timer; controls never hide mid-interaction", () => {
+    const h = harness();
+    const playing = ui({ status: "readyToPlay", isPlaying: true });
+    h.c.update(playing);
+    for (let i = 0; i < 6; i++) {
+      h.advance(AUTO_HIDE_MS - 500);
+      h.c.show(playing); // play/pause, skip, volume, speed, fullscreen all call showControlsWithTimer
+    }
+    assert.equal(h.usable, true, "kept up while the user keeps interacting");
+    assert.equal(h.liveTimers(), 1, "only one hide timer at a time");
+    h.advance(AUTO_HIDE_MS);
+    h.finishFades();
+    assert.equal(h.mounted, false, "hides after the inactivity period");
+  });
+
+  test("pausing keeps the controls; resuming restarts the auto-hide", () => {
+    const h = harness();
+    h.c.update(ui({ status: "readyToPlay", isPlaying: true }));
+    h.c.update(ui({ status: "readyToPlay", isPlaying: false }));
+    h.advance(60_000);
+    assert.equal(h.usable, true);
+    assert.equal(h.liveTimers(), 0);
+    h.c.update(ui({ status: "readyToPlay", isPlaying: true }));
+    assert.equal(h.liveTimers(), 1);
+    h.advance(AUTO_HIDE_MS);
+    h.finishFades();
+    assert.equal(h.mounted, false);
+  });
+});
+
+describe("10 s seeking", () => {
+  test("forward and back by 10 s, clamped to the video", () => {
+    assert.equal(clampedSeekTarget(30, 10, 120), 40);
+    assert.equal(clampedSeekTarget(30, -10, 120), 20);
+    assert.equal(clampedSeekTarget(4, -10, 120), 0, "never before 0");
+    assert.equal(clampedSeekTarget(115, 10, 120), 119.5, "never past the end (stays playable)");
+    assert.equal(clampedSeekTarget(119.8, 10, 120), 119.5);
+    assert.equal(clampedSeekTarget(30, 10, 0), null, "forward needs a known duration");
+    assert.equal(clampedSeekTarget(30, -10, NaN), 20, "back works without a duration");
+    assert.equal(clampedSeekTarget(NaN, 10, 120), null);
+  });
+});
+
+describe("touch wiring (source)", () => {
+  const p = strip(read("components/VideoPlayerEnhanced.tsx"));
+
+  test("ROOT CAUSE: the tap catchers over both video views are real native views (not flattened)", () => {
+    assert.equal((p.match(/<View style=\{StyleSheet\.absoluteFill\} collapsable=\{false\} \/>/g) ?? []).length, 2);
+    assert.doesNotMatch(p, /<View style=\{StyleSheet\.absoluteFill\} \/>/);
+    // Each catcher sits right after its VideoView, below the controls overlay.
+    // (strip() turns the JSX comment above each catcher into "{}")
+    assert.equal((p.match(/surfaceType="textureView"\s*\/>\s*(?:\{\}\s*)?<View style=\{StyleSheet\.absoluteFill\} collapsable=\{false\} \/>/g) ?? []).length, 2);
+  });
+
+  test("surface presses go through the classifier; controls cancel pending surface taps", () => {
+    assert.match(p, /tapClassifier\.press\(/);
+    assert.equal((p.match(/tapClassifier\.cancel\(\)/g) ?? []).length >= 4, true, "play/pause, back, forward, volume (+ unmount)");
+    assert.doesNotMatch(p, /singleTapTimeout|lastTap\.current/, "old ad-hoc tap timing removed");
+  });
+
+  test("actions never wait for haptics; seeks use the player's real position, clamped", () => {
+    assert.doesNotMatch(p, /await Haptics\.impactAsync/);
+    assert.doesNotMatch(p, /player\.seekBy\(/);
+    assert.match(p, /clampedSeekTarget\(Number\(player\.currentTime\), delta, Number\(player\.duration\) \|\| duration\)/);
+  });
+
+  test("volume controls count as interactions (timer restart / hold while dragging)", () => {
+    assert.match(p, /setShowVolumeBar\(!showVolumeBar\);\s*showControlsWithTimer\(\);/);
+    assert.match(p, /onSlidingStart=\{\(\) => controls\.hold\(uiInputs\(\)\)\}/);
+    assert.match(p, /onSlidingComplete=\{\(\) => controls\.release\(uiInputs\(\)\)\}/);
+  });
+});
+
+// ── Focused regressions for the reported OPPO behaviour (2026-11-15) ────────
+describe("play/pause decisions", () => {
+  test("pause when playing; play when paused; restart when at the end", () => {
+    assert.equal(playPauseAction(true, 30, 120), "pause");
+    assert.equal(playPauseAction(false, 30, 120), "play");
+    assert.equal(playPauseAction(false, 119.6, 120), "restart");
+    assert.equal(playPauseAction(false, 120, 120), "restart");
+    assert.equal(playPauseAction(true, 120, 120), "pause", "playing always pauses");
+    assert.equal(playPauseAction(false, 30, 0), "play", "unknown duration: just play");
+    assert.equal(playPauseAction(false, NaN, 120), "play");
+  });
+
+  test("the button uses the player's real state, not React state", () => {
+    const p = strip(read("components/VideoPlayerEnhanced.tsx"));
+    assert.match(p, /const action = playPauseAction\(\s*player\.playing,\s*Number\(player\.currentTime\),\s*Number\(player\.duration\) \|\| duration,\s*\);/);
+    assert.doesNotMatch(p, /const isAtEnd = duration > 0/);
+  });
+});
+
+describe("end to end: surface taps drive the controls (classifier + controller, as wired in the player)", () => {
+  /** Real classifier + real controller, fake clock shared by both. */
+  function player() {
+    let now = 10_000;
+    const timers: Array<{ at: number; fn: () => void; live: boolean }> = [];
+    const setTimer = (fn: () => void, ms: number) => { const t = { at: now + ms, fn, live: true }; timers.push(t); return t; };
+    const clearTimer = (h: any) => { h.live = false; };
+    let shown = true;
+    let state: PlayerUiInputs = ui({ status: "readyToPlay", isPlaying: true });
+    let position = 60;
+    const seeks: number[] = [];
+    const controls = createControlsVisibility({
+      setTimer, clearTimer,
+      render: (visible, token) => {
+        if (visible) shown = true;
+        else if (controls.commitHidden(token, true)) shown = false; // fade completes
+      },
+    });
+    const taps = createTapClassifier({
+      setTimer, clearTimer, now: () => now,
+      onSingle: () => controls.toggle(state),
+      onDouble: (side) => {
+        const t = clampedSeekTarget(position, side === "left" ? -10 : 10, 300);
+        if (t !== null) { seeks.push(t); position = t; }
+      },
+    });
+    const advance = (ms: number) => {
+      const end = now + ms;
+      for (;;) {
+        const next = timers.filter((t) => t.live && t.at <= end).sort((a, b) => a.at - b.at)[0];
+        if (!next) break;
+        now = next.at; next.live = false; next.fn();
+      }
+      now = end;
+    };
+    controls.update(state);
+    return {
+      controls, taps, advance, seeks,
+      get shown() { return shown; },
+      get position() { return position; },
+      setState(s: PlayerUiInputs) { state = s; controls.update(s); },
+    };
+  }
+
+  test("playing -> auto-hide -> one tap anywhere brings the controls back (centre, left, right)", () => {
+    for (const side of ["right", "left", "right"] as const) {
+      const p = player();
+      p.advance(AUTO_HIDE_MS);
+      assert.equal(p.shown, false, "auto-hidden during playback");
+      p.taps.press(side);
+      p.advance(DOUBLE_TAP_MS);
+      assert.equal(p.shown, true, `tap on ${side} shows the controls`);
+      assert.deepEqual(p.seeks, [], "no accidental seek");
+    }
+  });
+
+  test("the same tap delivered twice (the old flattened-catcher path) still shows the controls instead of seeking", () => {
+    const p = player();
+    p.advance(AUTO_HIDE_MS);
+    p.taps.press("right");
+    p.advance(8); // second delivery of the same physical tap
+    p.taps.press("right");
+    p.advance(DOUBLE_TAP_MS);
+    assert.equal(p.shown, true);
+    assert.deepEqual(p.seeks, []);
+    assert.equal(p.position, 60, "video position unchanged");
+  });
+
+  test("repeated show/hide cycles stay reliable (no stuck state, one timer)", () => {
+    const p = player();
+    for (let i = 0; i < 20; i++) {
+      p.advance(AUTO_HIDE_MS);
+      assert.equal(p.shown, false, `cycle ${i}: hidden`);
+      p.taps.press(i % 2 ? "left" : "right");
+      p.advance(DOUBLE_TAP_MS);
+      assert.equal(p.shown, true, `cycle ${i}: shown`);
+    }
+  });
+
+  test("controls shown by a tap auto-hide again after inactivity; an interaction pushes that back", () => {
+    const p = player();
+    p.advance(AUTO_HIDE_MS);
+    p.taps.press("right");
+    p.advance(DOUBLE_TAP_MS);
+    p.advance(AUTO_HIDE_MS - 100);
+    assert.equal(p.shown, true);
+    p.controls.show(ui({ status: "readyToPlay", isPlaying: true })); // e.g. skip forward pressed
+    p.advance(AUTO_HIDE_MS - 100);
+    assert.equal(p.shown, true, "timer restarted by the interaction");
+    p.advance(200);
+    assert.equal(p.shown, false);
+  });
+
+  test("double tap seeks 10 s on each side, clamped", () => {
+    const p = player();
+    p.taps.press("right"); p.advance(100); p.taps.press("right");
+    p.advance(DOUBLE_TAP_MS + 10);
+    p.taps.press("left"); p.advance(100); p.taps.press("left");
+    assert.deepEqual(p.seeks, [70, 60]);
+  });
+
+  test("paused: controls stay visible however long; resume restarts auto-hide", () => {
+    const p = player();
+    p.setState(ui({ status: "readyToPlay", isPlaying: false }));
+    p.advance(120_000);
+    assert.equal(p.shown, true);
+    p.setState(ui({ status: "readyToPlay", isPlaying: true }));
+    p.advance(AUTO_HIDE_MS);
+    assert.equal(p.shown, false);
   });
 });
