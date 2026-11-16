@@ -16,8 +16,16 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useColors } from "@/hooks/useColors";
-import { supabase } from "@/lib/supabase";
 import { apiRequest } from "@/lib/auth/apiClient";
+import {
+  buildSubmitPayload,
+  mapQuizQuestions,
+  parseSubmitResult,
+  selectAnswer,
+  selectedFor,
+  type QuizAnswers,
+  type QuizQuestion,
+} from "@/lib/quizSession";
 import { TEXT_STYLES } from "@/constants/typography";
 
 export default function QuizScreen() {
@@ -25,21 +33,24 @@ export default function QuizScreen() {
   const insets = useSafeAreaInsets();
   const { id: lessonId, title } = useLocalSearchParams<{ id: string; title?: string }>();
 
-  const [questions, setQuestions] = useState<any[]>([]);
+  const [questions, setQuestions] = useState<QuizQuestion[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [currentIndex, setCurrentIndex] = useState(0);
-  const [selectedOption, setSelectedOption] = useState<number | null>(null);
-  const [answers, setAnswers] = useState<number[]>([]);
+  // One answer per question id; the backend grades them all on Finish
+  // (lib/quizSession.ts). Answers can be changed until the quiz is submitted.
+  const [answers, setAnswers] = useState<QuizAnswers>({});
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [timeLeft, setTimeLeft] = useState(600);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const shakeAnim = useRef(new Animated.Value(0)).current;
   // Refs mirror state so the timer interval always sees the latest values
   // without needing to be torn down and recreated on every answer.
-  const answersRef = useRef<number[]>([]);
-  const selectedRef = useRef<number | null>(null);
+  const answersRef = useRef<QuizAnswers>({});
+  const questionsRef = useRef<QuizQuestion[]>([]);
   const finishedRef = useRef(false);
+  const submittingRef = useRef(false);
   useEffect(() => { answersRef.current = answers; }, [answers]);
-  useEffect(() => { selectedRef.current = selectedOption; }, [selectedOption]);
+  useEffect(() => { questionsRef.current = questions; }, [questions]);
 
   useEffect(() => {
     async function loadQuiz() {
@@ -51,28 +62,9 @@ export default function QuizScreen() {
       setIsLoading(true);
       try {
         const res = await apiRequest<any>(`/quiz-questions/lesson/${lessonId}`);
-        const list = res?.data ?? (Array.isArray(res) ? res : null);
-        if (Array.isArray(list) && list.length > 0) {
-          const mapped = list.map((q: any) => {
-            let opts = [];
-            try {
-              opts = typeof q.options === 'string' ? JSON.parse(q.options) : q.options;
-            } catch {
-              opts = Array.isArray(q.options) ? q.options : [];
-            }
-            return {
-              id: q.id,
-              question: q.question_text,
-              options: opts,
-              correctIndex: q.correct_option_index !== undefined ? Number(q.correct_option_index) : undefined,
-              explanation: "Select the correct answer to complete this question.",
-            };
-          });
-          setQuestions(mapped);
-          setTimeLeft(mapped.length * 60 || 600);
-        } else {
-          setQuestions([]);
-        }
+        const mapped = mapQuizQuestions(res);
+        setQuestions(mapped);
+        if (mapped.length > 0) setTimeLeft(mapped.length * 60 || 600);
       } catch (err: any) {
         console.error('[Quiz] load error:', err);
         setQuestions([]);
@@ -94,11 +86,7 @@ export default function QuizScreen() {
           if (timerRef.current) clearInterval(timerRef.current);
           // Defer navigation out of the state updater; include the answer the
           // user selected but hadn't pressed "Next" on yet.
-          setTimeout(() => {
-            const final = [...answersRef.current];
-            if (final.length < questions.length) final.push(selectedRef.current ?? -1);
-            finishQuiz(final);
-          }, 0);
+          setTimeout(() => { void finishQuiz(); }, 0);
           return 0;
         }
         return t - 1;
@@ -177,84 +165,74 @@ export default function QuizScreen() {
   const mins = Math.floor(timeLeft / 60);
   const secs = timeLeft % 60;
 
-  async function selectOption(idx: number) {
-    if (selectedOption !== null) return;
-    setSelectedOption(idx);
+  const selectedOption = selectedFor(answers, question);
 
-    let isCorrect = false;
-    let correctIdx = question.correctIndex;
-
-    if (correctIdx !== undefined) {
-      isCorrect = idx === correctIdx;
-    } else {
-      try {
-        const { data, error } = await (supabase as any).rpc("check_quiz_answer", {
-          p_question_id: question.id,
-          p_selected_index: idx,
-        });
-        if (!error && data && data.length > 0) {
-          isCorrect = !!data[0].is_correct;
-          correctIdx = Number(data[0].correct_option_index);
-          question.correctIndex = correctIdx;
-          setQuestions([...questions]);
-        }
-      } catch (e) {
-        console.warn("[Quiz] check_quiz_answer error:", e);
-      }
-    }
-
-    if (isCorrect) {
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    } else {
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-      Animated.sequence([
-        Animated.timing(shakeAnim, { toValue: 8, duration: 60, useNativeDriver: true }),
-        Animated.timing(shakeAnim, { toValue: -8, duration: 60, useNativeDriver: true }),
-        Animated.timing(shakeAnim, { toValue: 6, duration: 60, useNativeDriver: true }),
-        Animated.timing(shakeAnim, { toValue: 0, duration: 60, useNativeDriver: true }),
-      ]).start();
-    }
+  function selectOption(idx: number) {
+    if (submittingRef.current || finishedRef.current) return;
+    setAnswers((prev) => selectAnswer(prev, question, idx));
+    Haptics.selectionAsync();
   }
 
   function next() {
-    const newAnswers = [...answers, selectedOption ?? -1];
+    if (selectedOption === null || submittingRef.current) return;
     if (currentIndex < questions.length - 1) {
-      setAnswers(newAnswers);
+      // The next question starts without a selection (answers are per question id).
       setCurrentIndex(currentIndex + 1);
-      setSelectedOption(null);
     } else {
-      if (timerRef.current) clearInterval(timerRef.current);
-      finishQuiz(newAnswers);
+      void finishQuiz();
     }
   }
 
-  function finishQuiz(finalAnswers: number[]) {
-    if (finishedRef.current) return; // prevent double navigation (timeout + Finish tap)
-    finishedRef.current = true;
+  /**
+   * Grades the quiz on the server (POST /quiz-attempts/submit): the backend
+   * compares each answer with its stored correct option and records one
+   * attempt. The result screen shows the server's score. On failure nothing
+   * is shown as graded and the learner can retry.
+   */
+  async function finishQuiz() {
+    if (finishedRef.current || submittingRef.current) return; // timeout + Finish tap
+    const qs = questionsRef.current;
+    if (!lessonId || qs.length === 0) return;
+    submittingRef.current = true;
+    setIsSubmitting(true);
     if (timerRef.current) clearInterval(timerRef.current);
-    const score = finalAnswers.reduce((s, ans, i) => (questions[i]?.correctIndex !== undefined && ans === questions[i].correctIndex ? s + 1 : s), 0);
-    router.replace({
-      pathname: "/quiz/result",
-      params: { 
-        quizId: lessonId, 
-        score: score.toString(), 
-        total: questions.length.toString(),
-        title: title ?? "Quiz"
-      },
-    });
+    try {
+      const payload = buildSubmitPayload(lessonId, qs, answersRef.current);
+      const res = await apiRequest<any>("/quiz-attempts/submit", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      const result = parseSubmitResult(res, qs);
+      finishedRef.current = true;
+      router.replace({
+        pathname: "/quiz/result",
+        params: {
+          quizId: lessonId,
+          score: result.score.toString(),
+          total: result.total.toString(),
+          title: title ?? "Quiz",
+        },
+      });
+    } catch (err) {
+      console.warn("[Quiz] submit failed:", (err as any)?.message ?? err);
+      submittingRef.current = false;
+      setIsSubmitting(false);
+      Alert.alert(
+        "Couldn't submit quiz",
+        "Your answers are still here. Check your connection and try again.",
+        [
+          { text: "Cancel", style: "cancel" },
+          { text: "Try again", onPress: () => { void finishQuiz(); } },
+        ],
+      );
+    }
   }
 
   const optionColors = (idx: number) => {
-    if (selectedOption === null) {
-      return { bg: colors.card, border: colors.border, text: colors.foreground };
-    }
-    if (question.correctIndex !== undefined && idx === question.correctIndex) {
-      return { bg: "#DCF7F4", border: "#17E5D3", text: "#063B4F" };
-    }
     if (idx === selectedOption) {
-      return { bg: "#FEE2E2", border: "#EF4444", text: "#7F1D1D" };
+      return { bg: colors.accent, border: colors.primary, text: colors.foreground };
     }
-    return { bg: colors.card, border: colors.border, text: colors.mutedForeground };
+    return { bg: colors.card, border: colors.border, text: colors.foreground };
   };
 
   return (
@@ -298,7 +276,9 @@ export default function QuizScreen() {
                   key={idx}
                   style={[styles.option, { backgroundColor: oc.bg, borderColor: oc.border }]}
                   onPress={() => selectOption(idx)}
-                  disabled={selectedOption !== null}
+                  disabled={isSubmitting}
+                  accessibilityRole="radio"
+                  accessibilityState={{ selected: idx === selectedOption, disabled: isSubmitting }}
                 >
                   <View style={[styles.optionLetter, { backgroundColor: oc.border }]}>
                     <Text style={[styles.optionLetterText, TEXT_STYLES.label, { color: "#FFF" }]}>
@@ -306,11 +286,8 @@ export default function QuizScreen() {
                     </Text>
                   </View>
                   <Text style={[styles.optionText, TEXT_STYLES.description, { color: oc.text, flex: 1 }]}>{opt}</Text>
-                  {selectedOption !== null && question.correctIndex !== undefined && idx === question.correctIndex && (
-                    <Ionicons name="checkmark-circle" size={20} color="#17E5D3" />
-                  )}
-                  {selectedOption === idx && question.correctIndex !== undefined && idx !== question.correctIndex && (
-                    <Ionicons name="close-circle" size={20} color="#EF4444" />
+                  {idx === selectedOption && (
+                    <Ionicons name="checkmark-circle" size={20} color={colors.primary} />
                   )}
                 </Pressable>
               );
@@ -321,7 +298,7 @@ export default function QuizScreen() {
             <View style={[styles.explanationBox, { backgroundColor: colors.accent }]}>
               <Ionicons name="information-circle" size={16} color={colors.primary} style={{ marginRight: 4 }} />
               <Text style={[styles.explanationText, TEXT_STYLES.description, { color: colors.primary, flex: 1, fontSize: 13 }]}>
-                {question.explanation}
+                Answer saved. You can change it before moving on; results are shown when you finish the quiz.
               </Text>
             </View>
           )}
@@ -337,9 +314,16 @@ export default function QuizScreen() {
           ]}
         >
           <Pressable
-            style={({ pressed }) => [styles.nextBtn, { backgroundColor: colors.primary, opacity: pressed ? 0.85 : 1 }]}
+            style={({ pressed }) => [styles.nextBtn, { backgroundColor: colors.primary, opacity: pressed || isSubmitting ? 0.85 : 1 }]}
             onPress={next}
+            disabled={isSubmitting}
           >
+            {isSubmitting ? (
+              <View style={styles.btnContent}>
+                <ActivityIndicator size="small" color="#FFF" style={{ marginRight: 8 }} />
+                <Text style={[styles.nextBtnText, TEXT_STYLES.button, { color: "#FFF" }]}>Submitting...</Text>
+              </View>
+            ) : (
             <View style={styles.btnContent}>
               <Ionicons name="arrow-forward" size={16} color="#FFF" style={{ marginRight: 6 }} />
               <Text style={[styles.nextBtnText, TEXT_STYLES.button, { color: "#FFF" }]}>
@@ -347,6 +331,7 @@ export default function QuizScreen() {
               </Text>
               <Ionicons name="chevron-forward" size={16} color="#FFF" style={{ marginLeft: 6 }} />
             </View>
+            )}
           </Pressable>
         </View>
       )}
